@@ -125,34 +125,66 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
     console.log('[details] Waiting for CAPTCHA resolution...');
     await captchaPromise;
 
-    // After CAPTCHA is solved, the original View click was consumed by the
-    // Turnstile overlay — Angular never received the (click) event.
-    // Check if the dialog opened; if not, re-click View.
-    await page.waitForTimeout(1000);
+    // After CAPTCHA is solved, the page may reload/refresh.
+    // Wait for page to stabilize, then check state.
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(2000);
 
-    let dialogOpen = await page.locator('mat-dialog-container').isVisible({ timeout: 2000 }).catch(() => false);
+    // Log page state after CAPTCHA for debugging
+    const postCaptchaState = await page.evaluate(() => ({
+      url: location.href,
+      hasDialog: !!document.querySelector('mat-dialog-container'),
+      hasSearchResults: !!document.querySelector('td[data-column="Name"]'),
+      hasSearchInput: !!document.querySelector('#company-partnership-text-field'),
+      hasTurnstile: !!document.querySelector('[class*="turnstile"], iframe[src*="turnstile"]'),
+      bodyText: document.body.innerText.substring(0, 200),
+    }));
+    console.log('[details] Post-CAPTCHA state:', JSON.stringify(postCaptchaState));
 
-    if (!dialogOpen) {
-      console.log('[details] Dialog not open after CAPTCHA — re-clicking View');
+    // If dialog is already open (rare), skip re-search
+    if (!postCaptchaState.hasDialog) {
+      // After Turnstile, the page may have reloaded — search results may be gone
+      if (!postCaptchaState.hasSearchResults) {
+        console.log('[details] Search results gone after CAPTCHA — re-doing search');
+        await page.waitForSelector('#company-partnership-text-field', { timeout: 10000 });
+        await page.click('#fileNo');
+        await page.waitForTimeout(300);
+        await page.fill('#company-partnership-text-field', fileNumber);
+        await page.click('button[type="submit"]');
+        await page.waitForFunction(() => {
+          const rows = document.querySelectorAll('lib-mns-universal-table table tbody tr');
+          if (rows.length === 0) return false;
+          return rows[0].querySelector('td[data-column="Name"]') !== null;
+        }, { timeout: 15000 });
+      }
+
+      // Now click View — CAPTCHA should already be solved
+      console.log('[details] Clicking View icon');
       const viewIconRetry = page.locator('fa-icon[title="View"]').first();
-      if (await viewIconRetry.isVisible({ timeout: 3000 }).catch(() => false)) {
-        const actionBtnRetry = viewIconRetry.locator('xpath=ancestor::div[contains(@class,"action-btn")]').first();
-        if (await actionBtnRetry.count() > 0) {
-          await actionBtnRetry.click();
-        } else {
-          await viewIconRetry.click();
-        }
+      await viewIconRetry.waitFor({ timeout: 5000 });
+      const actionBtnRetry = viewIconRetry.locator('xpath=ancestor::div[contains(@class,"action-btn")]').first();
+      if (await actionBtnRetry.count() > 0) {
+        await actionBtnRetry.click();
+      } else {
+        await viewIconRetry.click();
       }
     }
 
     // Wait for the Material Dialog to appear (cbris-details-dialog)
     try {
       await page.waitForSelector('mat-dialog-container', { timeout: 15000 });
-      // Wait for content inside — label.value elements appear when data loads
       await page.waitForSelector('mat-dialog-container label.value', { timeout: 10000 });
       console.log('[details] Details dialog loaded');
     } catch {
       console.log('[details] Timed out waiting for details dialog');
+      // Log final page state for debugging
+      const finalState = await page.evaluate(() => ({
+        url: location.href,
+        hasDialog: !!document.querySelector('mat-dialog-container'),
+        hasOverlay: !!document.querySelector('.cdk-overlay-container .cdk-overlay-pane'),
+        visibleText: document.body.innerText.substring(0, 300),
+      }));
+      console.log('[details] Final state:', JSON.stringify(finalState));
     }
 
     await page.waitForLoadState('networkidle').catch(() => {});
