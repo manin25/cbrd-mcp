@@ -36,14 +36,20 @@ export class BrowserManager {
     const useChromium = process.env.CBRD_USE_CHROMIUM === 'true';
 
     if (cdpUrl && !useChromium) {
-      // Lightpanda requires WebSocket connection — convert http:// to ws:// if needed
-      const wsUrl = cdpUrl.replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://');
-      console.log(`Connecting to CDP browser at ${wsUrl}`);
-      this.browser = await chromium.connectOverCDP(wsUrl);
+      console.log(`Connecting to CDP browser at ${cdpUrl}`);
+      this.browser = await chromium.connectOverCDP(cdpUrl);
       this.isCDP = true;
-      // Lightpanda doesn't support Emulation.setUserAgentOverride, so pass empty options
-      this.context = await this.browser.newContext({});
-      this.page = await this.context.newPage();
+      // Lightpanda has limited CDP support: no Target.createBrowserContext,
+      // no Emulation.setUserAgentOverride. Use the default context and its existing page.
+      const contexts = this.browser.contexts();
+      this.context = contexts[0];
+      if (!this.context) {
+        throw new Error('No default browser context found from CDP connection');
+      }
+      // Use the existing page from Lightpanda (creating new pages may not be supported)
+      const pages = this.context.pages();
+      this.page = pages[0] ?? await this.context.newPage();
+      console.log(`CDP connected: ${contexts.length} contexts, ${pages.length} pages, page URL: ${this.page.url()}`);
     } else {
       // Launch local Chromium (for development)
       console.log('Launching local Chromium browser');

@@ -1,18 +1,24 @@
 import type { Page } from 'playwright-core';
 import { browserManager } from '../browser/manager.js';
-import type { CompanyDetails, PersonRole } from '../types.js';
+import type { CompanyDetails } from '../types.js';
+
+const CBRD_URL = 'https://onlinesearch.mns.mu/';
 
 /**
  * Get full details for a company by file number.
+ *
+ * First searches for the company, then clicks the "View" icon to navigate
+ * to the details page. The details page is protected by Cloudflare Turnstile,
+ * so if the token is not available, returns basic search info only.
  */
 export async function getCompanyDetails(fileNumber: string): Promise<CompanyDetails> {
   const page = await browserManager.getPage();
 
-  // Navigate to company details — try clicking from search results or direct URL
+  // Navigate to company details
   await navigateToCompanyDetails(page, fileNumber);
 
-  // Wait for details to load
-  await page.waitForLoadState(browserManager.waitUntil);
+  // Wait for details page to load
+  await page.waitForLoadState(browserManager.waitUntil).catch(() => {});
   await page.waitForTimeout(2000);
 
   // Extract all available details
@@ -22,137 +28,165 @@ export async function getCompanyDetails(fileNumber: string): Promise<CompanyDeta
 }
 
 async function navigateToCompanyDetails(page: Page, fileNumber: string): Promise<void> {
-  // Strategy 1: Look for a link/row with the file number
-  const fileLink = page.locator(`a:has-text("${fileNumber}"), td:has-text("${fileNumber}"), [class*="file"]:has-text("${fileNumber}")`);
-  if (await fileLink.first().isVisible({ timeout: 3000 }).catch(() => false)) {
-    await fileLink.first().click();
-    await page.waitForLoadState(browserManager.waitUntil);
-    return;
+  // Ensure we're on the search page
+  if (!page.url().includes('onlinesearch.mns.mu')) {
+    await page.goto(CBRD_URL, { waitUntil: browserManager.waitUntil });
   }
 
-  // Strategy 2: Search for the company by file number first
-  const { searchCompany } = await import('./search.js');
-  await searchCompany(fileNumber, 5);
+  // Select File No. radio button (only click if not already selected)
+  const fileNoRadio = page.locator('#fileNo');
+  if (await fileNoRadio.isVisible({ timeout: 2000 }).catch(() => false)) {
+    const isChecked = await fileNoRadio.isChecked().catch(() => false);
+    if (!isChecked) {
+      await fileNoRadio.click();
+      await page.waitForTimeout(300);
+    }
+  }
 
-  // Then try clicking the first result
-  const resultLink = page.locator('table tbody tr a, .mat-row a, tr[class*="row"] a, table tbody tr td').first();
-  if (await resultLink.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await resultLink.click();
-    await page.waitForLoadState(browserManager.waitUntil);
+  // Fill in the file number and search
+  const searchInput = page.locator('#company-partnership-text-field');
+  if (!await searchInput.isVisible({ timeout: 3000 }).catch(() => false)) {
+    // Angular SPA may be on a sub-route — navigate back to home
+    await page.goto(CBRD_URL, { waitUntil: browserManager.waitUntil });
+  }
+  await searchInput.clear();
+  await searchInput.fill(fileNumber);
+
+  // Submit search
+  const searchBtn = page.locator('button[type="submit"]');
+  if (await searchBtn.first().isVisible({ timeout: 2000 }).catch(() => false)) {
+    await searchBtn.first().click();
+  }
+
+  // Wait for actual data rows (not the "No result" placeholder)
+  try {
+    await page.waitForFunction(() => {
+      const rows = document.querySelectorAll('lib-mns-universal-table table tbody tr');
+      if (rows.length === 0) return false;
+      return rows[0].querySelector('td[data-column="Name"]') !== null;
+    }, { timeout: 15_000 });
+  } catch {}
+  await page.waitForTimeout(1000);
+
+  // Click the "View" icon (fa-icon with title="View") on the first result
+  const viewIcon = page.locator('fa-icon[title="View"]').first();
+  if (await viewIcon.isVisible({ timeout: 3000 }).catch(() => false)) {
+    await viewIcon.click();
+    console.log('Clicked View icon for company details');
+    // Wait for details page to load (Angular SPA navigation)
+    await page.waitForTimeout(5000);
+    await page.waitForLoadState(browserManager.waitUntil).catch(() => {});
+  } else {
+    console.log('View icon not found — details page may not be accessible');
   }
 }
 
 async function extractCompanyDetails(page: Page, fileNumber: string): Promise<CompanyDetails> {
-  const details = await page.evaluate((fn) => {
-    const result: {
-      companyName: string;
-      fileNumber: string;
-      brn?: string;
-      status?: string;
-      type?: string;
-      registrationDate?: string;
-      registeredOffice?: string;
-      natureOfBusiness?: string;
-      directors: Array<{ name: string; role: string; appointmentDate?: string; address?: string }>;
-      shareholders: Array<{ name: string; role: string; appointmentDate?: string; address?: string }>;
-      secretaries: Array<{ name: string; role: string; appointmentDate?: string; address?: string }>;
-    } = {
+  // Inject __name polyfill — esbuild/tsx adds __name() calls to function declarations
+  // which don't exist in the browser context
+  await page.evaluate(() => { (window as any).__name = (fn: any) => fn; });
+
+  const details = await page.evaluate(function(fn) {
+    var result = {
       companyName: '',
       fileNumber: fn,
-      directors: [],
-      shareholders: [],
-      secretaries: [],
+      brn: undefined as string | undefined,
+      status: undefined as string | undefined,
+      type: undefined as string | undefined,
+      registrationDate: undefined as string | undefined,
+      registeredOffice: undefined as string | undefined,
+      natureOfBusiness: undefined as string | undefined,
+      directors: [] as Array<{ name: string; role: string; appointmentDate?: string; address?: string }>,
+      shareholders: [] as Array<{ name: string; role: string; appointmentDate?: string; address?: string }>,
+      secretaries: [] as Array<{ name: string; role: string; appointmentDate?: string; address?: string }>,
     };
 
-    // Extract key-value pairs from the page
-    // Look for label-value patterns common in detail pages
-    const extractField = (labels: string[]): string | undefined => {
-      for (const label of labels) {
-        // Try label elements
-        const labelEls = document.querySelectorAll('label, dt, th, strong, b, [class*="label"], [class*="key"]');
-        for (const el of Array.from(labelEls)) {
-          if (el.textContent?.toLowerCase().includes(label.toLowerCase())) {
-            // The value is usually the next sibling or the parent's next element
-            const value = el.nextElementSibling?.textContent?.trim() ||
-                          el.parentElement?.querySelector('dd, td, [class*="value"], span')?.textContent?.trim() ||
-                          el.parentElement?.nextElementSibling?.textContent?.trim();
-            if (value) return value;
+    // Extract field by label matching
+    function extractField(labels: string[]): string | undefined {
+      var allLabels = document.querySelectorAll('label, dt, th, strong, b, h6, [class*="label"], [class*="key"]');
+      for (var i = 0; i < allLabels.length; i++) {
+        var el = allLabels[i];
+        var text = (el.textContent || '').toLowerCase().trim();
+        for (var j = 0; j < labels.length; j++) {
+          if (text.includes(labels[j].toLowerCase())) {
+            var value = (el.nextElementSibling as HTMLElement)?.textContent?.trim() ||
+                        el.parentElement?.querySelector('dd, td, [class*="value"], span:not(:first-child)')?.textContent?.trim() ||
+                        el.parentElement?.nextElementSibling?.textContent?.trim();
+            if (value && value.length < 500) return value;
           }
         }
       }
       return undefined;
-    };
+    }
 
     result.companyName = extractField(['company name', 'name of company', 'entity name']) || '';
-    result.brn = extractField(['brn', 'business registration', 'registration number']);
+    result.brn = extractField(['brn', 'business registration number']);
     result.status = extractField(['status', 'company status']);
-    result.type = extractField(['type', 'company type', 'entity type']);
+    result.type = extractField(['type', 'company type', 'category']);
     result.registrationDate = extractField(['registration date', 'date of incorporation', 'incorporated']);
     result.registeredOffice = extractField(['registered office', 'address', 'office address']);
     result.natureOfBusiness = extractField(['nature of business', 'business activity', 'principal activity']);
 
-    // Extract people (directors, shareholders, secretaries)
-    const extractPeople = (sectionLabels: string[], role: string) => {
-      const people: Array<{ name: string; role: string; appointmentDate?: string; address?: string }> = [];
-
-      // Find section headers
-      const headers = document.querySelectorAll('h2, h3, h4, h5, [class*="section"], [class*="header"], [role="tab"]');
-      for (const header of Array.from(headers)) {
-        const headerText = header.textContent?.toLowerCase() || '';
-        if (sectionLabels.some(l => headerText.includes(l.toLowerCase()))) {
-          // Find the table/list following this header
-          let nextEl = header.nextElementSibling;
-          while (nextEl && !['H2', 'H3', 'H4'].includes(nextEl.tagName)) {
-            const rows = nextEl.querySelectorAll('tr, li, [class*="row"]');
-            for (const row of Array.from(rows)) {
-              const cells = row.querySelectorAll('td, span, [class*="cell"]');
-              const name = cells[0]?.textContent?.trim();
-              if (name && name.length > 1) {
-                people.push({
-                  name,
-                  role,
-                  appointmentDate: cells[1]?.textContent?.trim() || undefined,
-                  address: cells[2]?.textContent?.trim() || undefined,
-                });
-              }
-            }
-            nextEl = nextEl.nextElementSibling;
-          }
+    // Extract people from tables with section headers
+    function extractPeople(sectionLabels: string[], role: string) {
+      var people: Array<{ name: string; role: string; appointmentDate?: string; address?: string }> = [];
+      var headers = document.querySelectorAll('h2, h3, h4, h5, [class*="section"], [class*="header"], [role="tab"]');
+      for (var h = 0; h < headers.length; h++) {
+        var headerText = (headers[h].textContent || '').toLowerCase();
+        var matches = false;
+        for (var s = 0; s < sectionLabels.length; s++) {
+          if (headerText.includes(sectionLabels[s].toLowerCase())) { matches = true; break; }
         }
-      }
-
-      // Fallback: look for tables with the role in column headers
-      if (people.length === 0) {
-        const tables = document.querySelectorAll('table');
-        for (const table of Array.from(tables)) {
-          const headerRow = table.querySelector('thead tr, tr:first-child');
-          const headerText = headerRow?.textContent?.toLowerCase() || '';
-          if (sectionLabels.some(l => headerText.includes(l.toLowerCase()))) {
-            const rows = table.querySelectorAll('tbody tr, tr:not(:first-child)');
-            for (const row of Array.from(rows)) {
-              const cells = row.querySelectorAll('td');
-              const name = cells[0]?.textContent?.trim();
-              if (name) {
-                people.push({
-                  name,
-                  role,
-                  appointmentDate: cells[1]?.textContent?.trim() || undefined,
-                  address: cells[2]?.textContent?.trim() || undefined,
-                });
-              }
+        if (!matches) continue;
+        var nextEl = headers[h].nextElementSibling;
+        while (nextEl && !['H2', 'H3', 'H4'].includes(nextEl.tagName)) {
+          var rows = nextEl.querySelectorAll('tr, li, [class*="row"]');
+          for (var r = 0; r < rows.length; r++) {
+            var row = rows[r];
+            var nameCell = row.querySelector('td[data-column*="Name" i], td:first-child');
+            var dateCell = row.querySelector('td[data-column*="Date" i], td:nth-child(2)');
+            var addrCell = row.querySelector('td[data-column*="Address" i], td:nth-child(3)');
+            var name = nameCell?.textContent?.trim();
+            if (name && name.length > 1) {
+              people.push({
+                name: name,
+                role: role,
+                appointmentDate: dateCell?.textContent?.trim() || undefined,
+                address: addrCell?.textContent?.trim() || undefined,
+              });
             }
           }
+          nextEl = nextEl.nextElementSibling;
         }
       }
-
       return people;
-    };
+    }
 
     result.directors = extractPeople(['director'], 'Director');
     result.shareholders = extractPeople(['shareholder', 'member'], 'Shareholder');
     result.secretaries = extractPeople(['secretary'], 'Secretary');
 
-    // If company name is still empty, try the page title or first heading
+    // Fallback: if still on search results page, extract basic info from the table
+    if (!result.companyName) {
+      var table = document.querySelector('lib-mns-universal-table table');
+      if (table) {
+        var firstRow = table.querySelector('tbody tr');
+        if (firstRow) {
+          var nameCell = firstRow.querySelector('td[data-column="Name"]');
+          var statusCell = firstRow.querySelector('td[data-column="Status"]');
+          var categoryCell = firstRow.querySelector('td[data-column="Category"]');
+          var natureCell = firstRow.querySelector('td[data-column="Nature"]');
+          var dateCell = firstRow.querySelector('td[data-column="Incorporation/ Registration Date"]');
+
+          result.companyName = nameCell?.textContent?.trim() || '';
+          result.status = statusCell?.textContent?.trim() || undefined;
+          result.type = ((categoryCell?.textContent?.trim() || '') + ' ' + (natureCell?.textContent?.trim() || '')).trim() || undefined;
+          result.registrationDate = dateCell?.textContent?.trim() || undefined;
+        }
+      }
+    }
+
+    // Last resort: page title
     if (!result.companyName) {
       result.companyName = document.querySelector('h1, h2, [class*="title"]')?.textContent?.trim() || '';
     }
