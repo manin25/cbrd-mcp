@@ -1,6 +1,7 @@
 import type { Page } from 'patchright-core';
 import { chromium } from 'patchright-core';
 import { lookupCompany } from './lookup.js';
+import { dismissCookieConsent } from '../browser/cookies.js';
 import type { CompanyDetails } from '../types.js';
 
 const CBRD_URL = 'https://onlinesearch.mns.mu/';
@@ -87,6 +88,9 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
 
     // Navigate to CBRD
     await page.goto(CBRD_URL, { waitUntil: 'networkidle' });
+
+    // Dismiss cookie consent banner (blocks clicks if not dismissed)
+    await dismissCookieConsent(page);
 
     // Wait for Angular to bootstrap
     await page.waitForSelector('#company-partnership-text-field', { timeout: 10000 });
