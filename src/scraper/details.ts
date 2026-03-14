@@ -69,8 +69,64 @@ async function tryClickViewAndExtract(
     console.log('Clicked View icon for company details');
 
     // Wait for details page to load (Angular SPA navigation)
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(3000);
+    console.log('[details] URL after View click:', page.url());
+
+    // Check if Turnstile overlay is present and wait for it to resolve
+    const turnstile = page.locator('cbris-turnstile, [class*="turnstile"]');
+    const hasTurnstile = await turnstile.first().isVisible({ timeout: 2000 }).catch(() => false);
+    console.log('[details] Turnstile visible:', hasTurnstile);
+
+    if (hasTurnstile) {
+      // Wait for Turnstile to auto-solve (up to 15s)
+      console.log('[details] Waiting for Turnstile to resolve...');
+      try {
+        await page.waitForFunction(() => {
+          const t = document.querySelector('cbris-turnstile, [class*="turnstile"]');
+          if (!t) return true;
+          // Check if it's hidden or removed
+          const style = window.getComputedStyle(t);
+          return style.display === 'none' || style.visibility === 'hidden';
+        }, { timeout: 15_000 });
+        console.log('[details] Turnstile resolved!');
+        await page.waitForTimeout(2000);
+      } catch {
+        console.log('[details] Turnstile did not resolve within 15s');
+      }
+    }
+
     await page.waitForLoadState(browserManager.waitUntil).catch(() => {});
+
+    // Dump page structure for debugging
+    const pageDebug = await page.evaluate(() => {
+      const body = document.body;
+      // Get all visible text sections
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, .card-header, [class*="title"], [class*="header"]'))
+        .map(h => `${h.tagName}${h.className ? '.' + h.className.split(' ').join('.') : ''}: "${(h.textContent || '').trim().substring(0, 100)}"`);
+
+      // Get all label-value pairs
+      const labels = Array.from(document.querySelectorAll('label, dt, th, strong, b, .form-label, [class*="label"]'))
+        .slice(0, 30)
+        .map(l => {
+          const text = (l.textContent || '').trim();
+          const sibling = (l.nextElementSibling as HTMLElement)?.textContent?.trim() || '';
+          return `"${text.substring(0, 50)}" → "${sibling.substring(0, 80)}"`;
+        });
+
+      // Get all tables
+      const tables = Array.from(document.querySelectorAll('table'))
+        .map(t => {
+          const rows = t.querySelectorAll('tr');
+          return `Table(${rows.length} rows): ${Array.from(t.querySelectorAll('th')).map(th => th.textContent?.trim()).join(', ')}`;
+        });
+
+      // Check for tabs/accordion
+      const tabs = Array.from(document.querySelectorAll('[role="tab"], .nav-link, .mat-tab-label'))
+        .map(t => (t.textContent || '').trim());
+
+      return { url: location.href, headings, labels: labels.slice(0, 20), tables, tabs, bodyLength: body.innerHTML.length };
+    });
+    console.log('[details] Page structure:', JSON.stringify(pageDebug, null, 2));
 
     // Inject __name polyfill for esbuild/tsx compatibility
     await page.evaluate(() => { (window as any).__name = (fn: any) => fn; });
