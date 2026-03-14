@@ -28,8 +28,8 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 
-# Install Playwright Chromium browser binary
-RUN npx playwright install chromium
+# Install Patchright Chromium browser binary (stealth-patched Playwright)
+RUN npx patchright install chromium
 
 # Copy source and build
 COPY tsconfig.json ./

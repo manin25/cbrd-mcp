@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext, type Page } from 'patchright-core';
 import { dismissCookieConsent } from './cookies.js';
 
 const CBRD_URL = 'https://onlinesearch.mns.mu/';
@@ -51,13 +51,20 @@ export class BrowserManager {
       this.page = pages[0] ?? await this.context.newPage();
       console.log(`CDP connected: ${contexts.length} contexts, ${pages.length} pages, page URL: ${this.page.url()}`);
     } else {
-      // Launch local Chromium (for development)
-      console.log('Launching local Chromium browser');
-      this.browser = await chromium.launch({ headless: true });
-      this.isCDP = false;
-      this.context = await this.browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      // Launch local Chromium via patchright (stealth-patched Playwright)
+      // Do NOT set a custom userAgent — patchright's stealth depends on the
+      // real Chromium UA matching TLS/JS fingerprints to pass Turnstile.
+      console.log('Launching local Chromium browser (patchright stealth)');
+      this.browser = await chromium.launch({
+        headless: true,
+        args: [
+          '--disable-blink-features=AutomationControlled',
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+        ],
       });
+      this.isCDP = false;
+      this.context = await this.browser.newContext();
       this.page = await this.context.newPage();
     }
     this.page.setDefaultTimeout(30_000);

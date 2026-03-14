@@ -1,4 +1,4 @@
-import type { Page } from 'playwright-core';
+import type { Page } from 'patchright-core';
 import { browserManager } from '../browser/manager.js';
 import type { CompanySearchResult } from '../types.js';
 

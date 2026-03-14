@@ -1,4 +1,4 @@
-import type { Page } from 'playwright-core';
+import type { Page } from 'patchright-core';
 
 /**
  * Dismisses the cookie consent banner on onlinesearch.mns.mu.
