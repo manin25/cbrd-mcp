@@ -1,21 +1,21 @@
 import type { Page } from 'patchright-core';
-import { browserManager } from '../browser/manager.js';
+import { chromium } from 'patchright-core';
 import { lookupCompany } from './lookup.js';
 import type { CompanyDetails } from '../types.js';
+
+const CBRD_URL = 'https://onlinesearch.mns.mu/';
 
 /**
  * Get full details for a company by file number.
  *
  * Workflow:
- * 1. Look up the company via file number to populate search results
- * 2. Click the View icon — this triggers a Turnstile verification overlay
- * 3. Wait for Turnstile to auto-solve (patchright stealth handles this)
- * 4. Extract directors, shareholders, secretaries from the details page
+ * 1. Look up the company via local browser to get basic info (name, status, type)
+ * 2. Use BrowserQL (browserless.io) to navigate, click View, solve Turnstile CAPTCHA
+ * 3. Reconnect with Playwright to extract directors, shareholders, secretaries
  */
 export async function getCompanyDetails(fileNumber: string): Promise<CompanyDetails> {
-  // Step 1: Look up the company to populate search results on the page
+  // Step 1: Look up the company for base details
   const searchResults = await lookupCompany(fileNumber, undefined);
-
   const match = searchResults.find(r => r.fileNumber === fileNumber) || searchResults[0];
   const baseDetails: CompanyDetails = {
     companyName: match?.companyName || '',
@@ -27,13 +27,10 @@ export async function getCompanyDetails(fileNumber: string): Promise<CompanyDeta
     secretaries: [],
   };
 
-  if (!match) {
-    return baseDetails;
-  }
+  if (!match) return baseDetails;
 
-  // Step 2: Click View and extract details
-  const page = await browserManager.getPage();
-  const extraDetails = await tryClickViewAndExtract(page, fileNumber);
+  // Step 2: Try getting full details via BrowserQL (CAPTCHA-solving cloud browser)
+  const extraDetails = await getDetailsViaBrowserless(fileNumber);
 
   if (extraDetails) {
     return {
@@ -52,96 +49,84 @@ export async function getCompanyDetails(fileNumber: string): Promise<CompanyDeta
   return baseDetails;
 }
 
-async function tryClickViewAndExtract(
-  page: Page,
-  fileNumber: string,
-): Promise<CompanyDetails | null> {
-  try {
-    // Find the View icon in search results
-    const viewIcon = page.locator('fa-icon[title="View"]').first();
-    if (!await viewIcon.isVisible({ timeout: 3000 }).catch(() => false)) {
-      console.log('[details] View icon not found on search results page');
-      return null;
-    }
+/**
+ * Use BrowserQL to navigate the CBRD site, click View, solve Turnstile,
+ * then reconnect with Playwright to extract the details page content.
+ */
+async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDetails | null> {
+  const token = process.env.BROWSERLESS_TOKEN;
+  if (!token) {
+    console.log('[details] No BROWSERLESS_TOKEN — skipping cloud browser details');
+    return null;
+  }
 
-    // Use Playwright's real .click() to trigger Angular's zone.js handler.
-    // This WILL cause the Turnstile overlay (cbris-turnstile) to appear and
-    // intercept pointer events — that's expected. The click will "fail" with
-    // a timeout, but Angular has already started the navigation + Turnstile flow.
-    console.log('[details] Clicking View icon (real click, expecting Turnstile intercept)...');
-    await viewIcon.click({ timeout: 5000 }).catch((err: any) => {
-      console.log('[details] Click intercepted (expected):', String(err).substring(0, 200));
+  try {
+    const timeout = 60000;
+    const queryParams = new URLSearchParams({ token, timeout: String(timeout) });
+    const endpoint = `https://production-lon.browserless.io/chromium/bql?${queryParams}`;
+
+    // BQL mutation: navigate to CBRD, search by file number, click View, solve CAPTCHA
+    const bqlQuery = `mutation SearchAndView {
+      goto(url: "${CBRD_URL}", waitUntil: networkIdle) { status }
+      fileNoRadio: click(selector: "#fileNo") { time }
+      typeFileNo: type(selector: "input[formcontrolname='searchText']", text: "${fileNumber}") { time }
+      search: click(selector: "button[type='submit']") { time }
+      waitView: waitForSelector(selector: "fa-icon[title=\\"View\\"]", timeout: 15000) { time }
+      viewClick: click(selector: "fa-icon[title=\\"View\\"]") { time }
+      solveCaptcha: solve { found solved time }
+      reconnect(timeout: 30000) { browserWSEndpoint }
+    }`;
+
+    console.log('[details] Sending BQL request to browserless.io...');
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: bqlQuery }),
     });
 
-    // Now wait for the Turnstile overlay to appear and then auto-resolve
-    console.log('[details] Checking for Turnstile overlay...');
-    await page.waitForTimeout(500);
-
-    const turnstileSelector = 'cbris-turnstile';
-    const hasTurnstile = await page.locator(turnstileSelector).first().isVisible({ timeout: 5000 }).catch(() => false);
-    console.log('[details] Turnstile overlay visible:', hasTurnstile);
-
-    if (hasTurnstile) {
-      // Wait for Turnstile to auto-solve and disappear (patchright stealth should handle this)
-      console.log('[details] Waiting for Turnstile to auto-solve (up to 30s)...');
-      try {
-        await page.waitForFunction(() => {
-          const el = document.querySelector('cbris-turnstile');
-          if (!el) return true;
-          // Check if it's been removed or hidden
-          const style = window.getComputedStyle(el);
-          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return true;
-          // Check if it no longer has the overlay div
-          const overlay = el.querySelector('.d-flex.justify-content-center.align-items-center');
-          if (!overlay) return true;
-          const overlayStyle = window.getComputedStyle(overlay);
-          return overlayStyle.display === 'none' || overlayStyle.visibility === 'hidden';
-        }, { timeout: 30_000 });
-        console.log('[details] Turnstile resolved!');
-      } catch {
-        console.log('[details] Turnstile did NOT resolve within 30s');
-        // Log Turnstile state for debugging
-        const turnstileState = await page.evaluate(() => {
-          const el = document.querySelector('cbris-turnstile');
-          if (!el) return 'not found';
-          return {
-            outerHTML: el.outerHTML.substring(0, 500),
-            childCount: el.children.length,
-            iframeCount: el.querySelectorAll('iframe').length,
-            iframeSrc: Array.from(el.querySelectorAll('iframe')).map(f => (f as HTMLIFrameElement).src).join(', '),
-          };
-        });
-        console.log('[details] Turnstile state after timeout:', JSON.stringify(turnstileState));
-        return null;
-      }
-    }
-
-    // Wait for details page content to load
-    await page.waitForTimeout(2000);
-    await page.waitForLoadState(browserManager.waitUntil).catch(() => {});
-
-    // Log final page state
-    const pageState = await page.evaluate(() => ({
-      url: location.href,
-      title: document.title,
-      headings: Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6'))
-        .map(h => `${h.tagName}: "${(h.textContent || '').trim().substring(0, 80)}"`)
-        .slice(0, 15),
-      bodyLength: document.body.innerHTML.length,
+    const json = await resp.json();
+    console.log('[details] BQL response:', JSON.stringify({
+      status: json.data?.goto?.status,
+      captchaFound: json.data?.solveCaptcha?.found,
+      captchaSolved: json.data?.solveCaptcha?.solved,
+      captchaTime: json.data?.solveCaptcha?.time,
+      hasEndpoint: !!json.data?.reconnect?.browserWSEndpoint,
+      errors: json.errors?.map((e: any) => e.message),
     }));
-    console.log('[details] Page state after Turnstile:', JSON.stringify(pageState));
 
-    // Check if we're still on the search page
-    const isStillSearchPage = await page.locator('h6:has-text("Make a Search")').isVisible({ timeout: 1000 }).catch(() => false);
-    if (isStillSearchPage) {
-      console.log('[details] Still on search page after Turnstile — navigation failed');
+    if (json.errors?.length) {
+      console.log('[details] BQL errors:', JSON.stringify(json.errors));
       return null;
     }
 
-    // We navigated to the details page! Extract everything.
-    return await extractDetailsFromPage(page, fileNumber);
+    const wsEndpoint = json.data?.reconnect?.browserWSEndpoint;
+    if (!wsEndpoint) {
+      console.log('[details] No browserWSEndpoint returned from BQL');
+      return null;
+    }
+
+    // Reconnect with Playwright to extract details from the loaded page
+    // Token must be appended to the reconnect URL
+    const reconnectUrl = `${wsEndpoint}?token=${token}`;
+    console.log('[details] Reconnecting with Playwright...');
+    const browser = await chromium.connectOverCDP(reconnectUrl);
+    const context = browser.contexts()[0];
+    const page = context?.pages()[0];
+
+    if (!page) {
+      console.log('[details] No page found after reconnect');
+      await browser.close();
+      return null;
+    }
+
+    // Wait for the details page content to settle
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    const details = await extractDetailsFromPage(page, fileNumber);
+    await browser.close();
+    return details;
   } catch (err) {
-    console.log('[details] Failed to extract details:', err);
+    console.log('[details] BrowserQL error:', err);
     return null;
   }
 }
@@ -150,7 +135,15 @@ async function extractDetailsFromPage(
   page: Page,
   fileNumber: string,
 ): Promise<CompanyDetails | null> {
-  await page.evaluate(() => { (window as any).__name = (fn: any) => fn; });
+  // Log what page we're on for debugging
+  const pageInfo = await page.evaluate(() => ({
+    url: location.href,
+    title: document.title,
+    headings: Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6'))
+      .map(h => (h.textContent || '').trim().substring(0, 60))
+      .slice(0, 10),
+  }));
+  console.log('[details] Extracting from page:', JSON.stringify(pageInfo));
 
   const details = await page.evaluate(function(fn) {
     var result = {
@@ -237,5 +230,6 @@ async function extractDetailsFromPage(
     return details as CompanyDetails;
   }
 
+  console.log('[details] Page appears to be search page, not details');
   return null;
 }
