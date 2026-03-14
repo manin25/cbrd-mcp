@@ -125,63 +125,49 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
     console.log('[details] Waiting for CAPTCHA resolution...');
     await captchaPromise;
 
-    // After CAPTCHA is solved, the page may reload/refresh.
-    // Wait for page to stabilize, then check state.
-    await page.waitForLoadState('networkidle').catch(() => {});
-    await page.waitForTimeout(2000);
+    // After CAPTCHA is solved, the Turnstile token is set in cookies.
+    // The original View click was consumed by Turnstile. Reload the page
+    // to let Angular initialize with the Turnstile token, then redo search + View.
+    console.log('[details] CAPTCHA solved — reloading page to apply token');
+    await page.goto(CBRD_URL, { waitUntil: 'networkidle' });
+    await dismissCookieConsent(page);
+    await page.waitForSelector('#company-partnership-text-field', { timeout: 10000 });
 
-    // Log page state after CAPTCHA for debugging
-    const postCaptchaState = await page.evaluate(() => ({
-      url: location.href,
-      hasDialog: !!document.querySelector('mat-dialog-container'),
-      hasSearchResults: !!document.querySelector('td[data-column="Name"]'),
-      hasSearchInput: !!document.querySelector('#company-partnership-text-field'),
-      hasTurnstile: !!document.querySelector('[class*="turnstile"], iframe[src*="turnstile"]'),
-      bodyText: document.body.innerText.substring(0, 200),
-    }));
-    console.log('[details] Post-CAPTCHA state:', JSON.stringify(postCaptchaState));
+    // Redo the search
+    await page.click('#fileNo');
+    await page.waitForTimeout(300);
+    await page.fill('#company-partnership-text-field', fileNumber);
+    await page.click('button[type="submit"]');
 
-    // If dialog is already open (rare), skip re-search
-    if (!postCaptchaState.hasDialog) {
-      // After Turnstile, the page may have reloaded — search results may be gone
-      if (!postCaptchaState.hasSearchResults) {
-        console.log('[details] Search results gone after CAPTCHA — re-doing search');
-        await page.waitForSelector('#company-partnership-text-field', { timeout: 10000 });
-        await page.click('#fileNo');
-        await page.waitForTimeout(300);
-        await page.fill('#company-partnership-text-field', fileNumber);
-        await page.click('button[type="submit"]');
-        await page.waitForFunction(() => {
-          const rows = document.querySelectorAll('lib-mns-universal-table table tbody tr');
-          if (rows.length === 0) return false;
-          return rows[0].querySelector('td[data-column="Name"]') !== null;
-        }, { timeout: 15000 });
-      }
+    await page.waitForFunction(() => {
+      const rows = document.querySelectorAll('lib-mns-universal-table table tbody tr');
+      if (rows.length === 0) return false;
+      return rows[0].querySelector('td[data-column="Name"]') !== null;
+    }, { timeout: 15000 });
 
-      // Now click View — CAPTCHA should already be solved
-      console.log('[details] Clicking View icon');
-      const viewIconRetry = page.locator('fa-icon[title="View"]').first();
-      await viewIconRetry.waitFor({ timeout: 5000 });
-      const actionBtnRetry = viewIconRetry.locator('xpath=ancestor::div[contains(@class,"action-btn")]').first();
-      if (await actionBtnRetry.count() > 0) {
-        await actionBtnRetry.click();
-      } else {
-        await viewIconRetry.click();
-      }
+    // Click View — Turnstile token should be active, no CAPTCHA this time
+    console.log('[details] Clicking View icon (post-CAPTCHA)');
+    const viewIconRetry = page.locator('fa-icon[title="View"]').first();
+    await viewIconRetry.waitFor({ timeout: 5000 });
+    const actionBtnRetry = viewIconRetry.locator('xpath=ancestor::div[contains(@class,"action-btn")]').first();
+    if (await actionBtnRetry.count() > 0) {
+      await actionBtnRetry.click();
+    } else {
+      await viewIconRetry.click();
     }
 
-    // Wait for the Material Dialog to appear (cbris-details-dialog)
+    // Wait for the Material Dialog to appear
     try {
       await page.waitForSelector('mat-dialog-container', { timeout: 15000 });
       await page.waitForSelector('mat-dialog-container label.value', { timeout: 10000 });
       console.log('[details] Details dialog loaded');
     } catch {
       console.log('[details] Timed out waiting for details dialog');
-      // Log final page state for debugging
       const finalState = await page.evaluate(() => ({
         url: location.href,
         hasDialog: !!document.querySelector('mat-dialog-container'),
         hasOverlay: !!document.querySelector('.cdk-overlay-container .cdk-overlay-pane'),
+        hasTurnstile: !!document.querySelector('iframe[src*="turnstile"]'),
         visibleText: document.body.innerText.substring(0, 300),
       }));
       console.log('[details] Final state:', JSON.stringify(finalState));
