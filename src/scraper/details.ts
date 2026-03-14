@@ -65,8 +65,64 @@ async function tryClickViewAndExtract(
       return null;
     }
 
-    await viewIcon.click();
-    console.log('Clicked View icon for company details');
+    // Inspect the View icon's HTML and parent structure
+    const viewHtml = await viewIcon.evaluate(el => {
+      const parent = el.closest('a, button, [routerlink], [ng-click], [click]');
+      return {
+        tagName: el.tagName,
+        outerHTML: el.outerHTML.substring(0, 300),
+        parentTag: parent?.tagName || 'none',
+        parentHTML: parent?.outerHTML?.substring(0, 300) || 'none',
+        parentHref: (parent as HTMLAnchorElement)?.href || 'none',
+        parentTarget: (parent as HTMLAnchorElement)?.target || 'none',
+        // Walk up to find any clickable ancestor
+        ancestors: (() => {
+          const anc: string[] = [];
+          let p: Element | null = el;
+          for (let i = 0; i < 5 && p; i++) {
+            anc.push(`${p.tagName}${p.className ? '.' + p.className.replace(/\s+/g, '.') : ''}`);
+            p = p.parentElement;
+          }
+          return anc;
+        })(),
+      };
+    });
+    console.log('[details] View icon structure:', JSON.stringify(viewHtml, null, 2));
+
+    // Listen for popup/new tab
+    const popupPromise = page.context().waitForEvent('page', { timeout: 5000 }).catch(() => null);
+
+    // Try clicking the parent link/button if the icon itself isn't the click target
+    const clickTarget = viewHtml.parentTag !== 'none'
+      ? viewIcon.locator('xpath=ancestor::a | ancestor::button').first()
+      : viewIcon;
+
+    const hasParentClickable = await clickTarget.count() > 0;
+    if (hasParentClickable && viewHtml.parentTag !== 'none') {
+      console.log('[details] Clicking parent clickable element instead of icon');
+      await clickTarget.click();
+    } else {
+      await viewIcon.click();
+    }
+    console.log('[details] Click performed');
+
+    // Check for popup
+    const popup = await popupPromise;
+    if (popup) {
+      console.log('[details] NEW TAB/POPUP detected! URL:', popup.url());
+      await popup.waitForLoadState('networkidle').catch(() => {});
+      console.log('[details] Popup loaded, URL:', popup.url());
+      // Switch to popup page for extraction
+      const popupDebug = await popup.evaluate(() => ({
+        url: location.href,
+        title: document.title,
+        bodyLength: document.body.innerHTML.length,
+        headings: Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6')).map(h => h.textContent?.trim()).slice(0, 10),
+      }));
+      console.log('[details] Popup structure:', JSON.stringify(popupDebug));
+      // Use popup page instead for extraction below
+      // page = popup; // We'll handle this after
+    }
 
     // Wait for details page to load (Angular SPA navigation)
     await page.waitForTimeout(3000);
