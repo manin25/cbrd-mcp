@@ -2,7 +2,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 /**
  * Simple API key authentication middleware.
- * Validates the Authorization: Bearer <key> header against CBRD_API_KEY env var.
+ * Accepts API key via:
+ *   1. Authorization: Bearer <key> header
+ *   2. ?api_key=<key> query parameter
  */
 export function validateApiKey(req: IncomingMessage, res: ServerResponse): boolean {
   const apiKey = process.env.CBRD_API_KEY;
@@ -12,19 +14,23 @@ export function validateApiKey(req: IncomingMessage, res: ServerResponse): boole
     return true;
   }
 
+  // Check Authorization header first
   const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Missing Authorization header' }));
-    return false;
+  if (authHeader) {
+    const [scheme, token] = authHeader.split(' ');
+    if (scheme === 'Bearer' && token === apiKey) {
+      return true;
+    }
   }
 
-  const [scheme, token] = authHeader.split(' ');
-  if (scheme !== 'Bearer' || token !== apiKey) {
-    res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Invalid API key' }));
-    return false;
+  // Check query parameter
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const queryKey = url.searchParams.get('api_key');
+  if (queryKey === apiKey) {
+    return true;
   }
 
-  return true;
+  res.writeHead(401, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Invalid or missing API key' }));
+  return false;
 }
