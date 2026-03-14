@@ -10,8 +10,8 @@ const CBRD_URL = 'https://onlinesearch.mns.mu/';
  *
  * Workflow:
  * 1. Look up the company via local browser to get basic info (name, status, type)
- * 2. Use BrowserQL (browserless.io) to navigate, click View, solve Turnstile CAPTCHA
- * 3. Reconnect with Playwright to extract directors, shareholders, secretaries
+ * 2. Connect Playwright to Browserless (solveCaptchas=true) to navigate, click View
+ * 3. Browserless auto-solves Turnstile CAPTCHA, then extract details
  */
 export async function getCompanyDetails(fileNumber: string): Promise<CompanyDetails> {
   // Step 1: Look up the company for base details
@@ -29,7 +29,7 @@ export async function getCompanyDetails(fileNumber: string): Promise<CompanyDeta
 
   if (!match) return baseDetails;
 
-  // Step 2: Try getting full details via BrowserQL (CAPTCHA-solving cloud browser)
+  // Step 2: Try getting full details via Browserless (CAPTCHA-solving cloud browser)
   const extraDetails = await getDetailsViaBrowserless(fileNumber);
 
   if (extraDetails) {
@@ -50,90 +50,89 @@ export async function getCompanyDetails(fileNumber: string): Promise<CompanyDeta
 }
 
 /**
- * Use BrowserQL to navigate the CBRD site, click View, solve Turnstile,
- * then reconnect with Playwright to extract the details page content.
+ * Connect Playwright to Browserless with solveCaptchas=true.
+ * Browserless auto-solves Turnstile when it appears after clicking View.
+ * Uses Playwright's .fill() which properly triggers Angular change detection.
  */
 async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDetails | null> {
   const token = process.env.BROWSERLESS_TOKEN;
   if (!token) {
-    console.log('[details] No BROWSERLESS_TOKEN — skipping cloud browser details');
+    console.log('[details] No BROWSERLESS_TOKEN — skipping');
     return null;
   }
 
+  let browser;
   try {
-    const timeout = 60000;
-    const queryParams = new URLSearchParams({ token, timeout: String(timeout) });
-    const endpoint = `https://production-lon.browserless.io/chromium/bql?${queryParams}`;
+    // Connect Playwright directly to Browserless with auto CAPTCHA solving
+    const wsUrl = `wss://production-lon.browserless.io/chromium?token=${token}&timeout=60000&solveCaptchas=true`;
+    console.log('[details] Connecting to Browserless...');
+    browser = await chromium.connectOverCDP(wsUrl);
+    const context = browser.contexts()[0] || await browser.newContext();
+    const page = context.pages()[0] || await context.newPage();
 
-    // BQL mutation: navigate to CBRD, search by file number, click View, solve CAPTCHA
-    const bqlQuery = `mutation SearchAndView {
-      goto(url: "${CBRD_URL}", waitUntil: networkIdle) { status }
-      fileNoRadio: click(selector: "#fileNo") { time }
-      typeFileNo: type(selector: "input[formcontrolname='searchText']", text: "${fileNumber}") { time }
-      search: click(selector: "button[type='submit']") { time }
-      waitView: waitForSelector(selector: "fa-icon[title=\\"View\\"]", timeout: 15000) { time }
-      viewClick: click(selector: "fa-icon[title=\\"View\\"]") { time }
-      solveCaptcha: solve { found solved time }
-      reconnect(timeout: 30000) { browserWSEndpoint }
-    }`;
-
-    console.log('[details] Sending BQL request to browserless.io...');
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ query: bqlQuery }),
+    // Set up CDP session to listen for CAPTCHA events
+    const cdp = await context.newCDPSession(page);
+    let captchaResolved = false;
+    let captchaResolve: (() => void) | null = null;
+    const captchaPromise = new Promise<void>((resolve) => {
+      captchaResolve = resolve;
+      // Auto-resolve after 30s if no captcha appears
+      setTimeout(() => { if (!captchaResolved) resolve(); }, 30000);
+    });
+    (cdp as any).on('Browserless.captchaAutoSolved', () => {
+      console.log('[details] CAPTCHA auto-solved');
+      captchaResolved = true;
+      captchaResolve?.();
     });
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      console.log(`[details] BQL HTTP ${resp.status}: ${text.substring(0, 200)}`);
-      return null;
+    // Navigate to CBRD
+    await page.goto(CBRD_URL, { waitUntil: 'networkidle' });
+
+    // Wait for Angular to bootstrap
+    await page.waitForSelector('#company-partnership-text-field', { timeout: 10000 });
+
+    // Switch to File No. search mode
+    await page.click('#fileNo');
+    await page.waitForTimeout(300);
+
+    // Fill search — Playwright .fill() triggers Angular's input/change events
+    await page.fill('#company-partnership-text-field', fileNumber);
+
+    // Submit search
+    await page.click('button[type="submit"]');
+
+    // Wait for actual data rows (not the "No result" placeholder)
+    await page.waitForFunction(() => {
+      const rows = document.querySelectorAll('lib-mns-universal-table table tbody tr');
+      if (rows.length === 0) return false;
+      return rows[0].querySelector('td[data-column="Name"]') !== null;
+    }, { timeout: 15000 });
+
+    // Click the View icon — try the parent action-btn div first (Angular handler target)
+    const viewIcon = page.locator('fa-icon[title="View"]').first();
+    await viewIcon.waitFor({ timeout: 5000 });
+    const actionBtn = viewIcon.locator('xpath=ancestor::div[contains(@class,"action-btn")]').first();
+    if (await actionBtn.count() > 0) {
+      await actionBtn.click();
+    } else {
+      await viewIcon.click();
     }
 
-    const json = await resp.json();
-    console.log('[details] BQL response:', JSON.stringify({
-      status: json.data?.goto?.status,
-      captchaFound: json.data?.solveCaptcha?.found,
-      captchaSolved: json.data?.solveCaptcha?.solved,
-      captchaTime: json.data?.solveCaptcha?.time,
-      hasEndpoint: !!json.data?.reconnect?.browserWSEndpoint,
-      errors: json.errors?.map((e: any) => e.message),
-    }));
+    // Wait for CAPTCHA to be solved (or 30s timeout if none appears)
+    console.log('[details] Waiting for CAPTCHA resolution...');
+    await captchaPromise;
 
-    if (json.errors?.length) {
-      console.log('[details] BQL errors:', JSON.stringify(json.errors));
-      return null;
-    }
-
-    const wsEndpoint = json.data?.reconnect?.browserWSEndpoint;
-    if (!wsEndpoint) {
-      console.log('[details] No browserWSEndpoint returned from BQL');
-      return null;
-    }
-
-    // Reconnect with Playwright to extract details from the loaded page
-    // Token must be appended to the reconnect URL
-    const reconnectUrl = `${wsEndpoint}?token=${token}`;
-    console.log('[details] Reconnecting with Playwright...');
-    const browser = await chromium.connectOverCDP(reconnectUrl);
-    const context = browser.contexts()[0];
-    const page = context?.pages()[0];
-
-    if (!page) {
-      console.log('[details] No page found after reconnect');
-      await browser.close();
-      return null;
-    }
-
-    // Wait for the details page content to settle
+    // Wait for details page to load after CAPTCHA
     await page.waitForLoadState('networkidle').catch(() => {});
 
+    // Extract details
     const details = await extractDetailsFromPage(page, fileNumber);
-    await browser.close();
     return details;
   } catch (err) {
-    console.log('[details] BrowserQL error:', err);
+    console.log('[details] Browserless error:', err);
     return null;
+  } finally {
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
