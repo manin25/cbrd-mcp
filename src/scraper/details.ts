@@ -126,7 +126,51 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
     console.log('[details] Waiting for CAPTCHA resolution...');
     await captchaPromise;
 
-    // Wait for details page to load after CAPTCHA
+    // After CAPTCHA is solved, the original View click was consumed by the
+    // Turnstile overlay — Angular never received the (click) event.
+    // We must re-click View now that CAPTCHA is cleared.
+    await page.waitForTimeout(1000);
+
+    // Check if we're still on the search page (Angular SPA, URL doesn't change)
+    const stillOnSearch = await page.evaluate(() => {
+      const h3 = document.querySelector('h3');
+      return h3?.textContent?.includes('Make a Search') ?? false;
+    });
+
+    if (stillOnSearch) {
+      console.log('[details] Still on search page after CAPTCHA — re-clicking View');
+      const viewIconRetry = page.locator('fa-icon[title="View"]').first();
+      if (await viewIconRetry.isVisible({ timeout: 3000 }).catch(() => false)) {
+        const actionBtnRetry = viewIconRetry.locator('xpath=ancestor::div[contains(@class,"action-btn")]').first();
+        if (await actionBtnRetry.count() > 0) {
+          await actionBtnRetry.click();
+        } else {
+          await viewIconRetry.click();
+        }
+      }
+    }
+
+    // Wait for the details view to load — look for content that only appears
+    // on the details page (not the search page)
+    try {
+      await page.waitForFunction(() => {
+        const h3 = document.querySelector('h3');
+        if (h3?.textContent?.includes('Make a Search')) return false;
+        // Details page should have labels like "Company Name", "BRN", etc.
+        const labels = document.querySelectorAll('label, dt, th, strong, h6');
+        for (let i = 0; i < labels.length; i++) {
+          const text = (labels[i].textContent || '').toLowerCase();
+          if (text.includes('company name') || text.includes('director') || text.includes('brn')) {
+            return true;
+          }
+        }
+        return false;
+      }, { timeout: 15000 });
+      console.log('[details] Details page loaded');
+    } catch {
+      console.log('[details] Timed out waiting for details page content');
+    }
+
     await page.waitForLoadState('networkidle').catch(() => {});
 
     // Extract details
