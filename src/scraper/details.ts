@@ -36,11 +36,10 @@ export async function getCompanyDetails(fileNumber: string): Promise<CompanyDeta
   if (extraDetails) {
     return {
       ...baseDetails,
+      ...extraDetails,
       companyName: extraDetails.companyName || baseDetails.companyName,
-      brn: extraDetails.brn || baseDetails.brn,
-      registrationDate: extraDetails.registrationDate || baseDetails.registrationDate,
-      registeredOffice: extraDetails.registeredOffice,
-      natureOfBusiness: extraDetails.natureOfBusiness,
+      status: extraDetails.status || baseDetails.status,
+      type: extraDetails.type || baseDetails.type,
       directors: extraDetails.directors.length > 0 ? extraDetails.directors : baseDetails.directors,
       shareholders: extraDetails.shareholders.length > 0 ? extraDetails.shareholders : baseDetails.shareholders,
       secretaries: extraDetails.secretaries.length > 0 ? extraDetails.secretaries : baseDetails.secretaries,
@@ -128,17 +127,13 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
 
     // After CAPTCHA is solved, the original View click was consumed by the
     // Turnstile overlay — Angular never received the (click) event.
-    // We must re-click View now that CAPTCHA is cleared.
+    // Check if the dialog opened; if not, re-click View.
     await page.waitForTimeout(1000);
 
-    // Check if we're still on the search page (Angular SPA, URL doesn't change)
-    const stillOnSearch = await page.evaluate(() => {
-      const h3 = document.querySelector('h3');
-      return h3?.textContent?.includes('Make a Search') ?? false;
-    });
+    let dialogOpen = await page.locator('mat-dialog-container').isVisible({ timeout: 2000 }).catch(() => false);
 
-    if (stillOnSearch) {
-      console.log('[details] Still on search page after CAPTCHA — re-clicking View');
+    if (!dialogOpen) {
+      console.log('[details] Dialog not open after CAPTCHA — re-clicking View');
       const viewIconRetry = page.locator('fa-icon[title="View"]').first();
       if (await viewIconRetry.isVisible({ timeout: 3000 }).catch(() => false)) {
         const actionBtnRetry = viewIconRetry.locator('xpath=ancestor::div[contains(@class,"action-btn")]').first();
@@ -150,25 +145,14 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
       }
     }
 
-    // Wait for the details view to load — look for content that only appears
-    // on the details page (not the search page)
+    // Wait for the Material Dialog to appear (cbris-details-dialog)
     try {
-      await page.waitForFunction(() => {
-        const h3 = document.querySelector('h3');
-        if (h3?.textContent?.includes('Make a Search')) return false;
-        // Details page should have labels like "Company Name", "BRN", etc.
-        const labels = document.querySelectorAll('label, dt, th, strong, h6');
-        for (let i = 0; i < labels.length; i++) {
-          const text = (labels[i].textContent || '').toLowerCase();
-          if (text.includes('company name') || text.includes('director') || text.includes('brn')) {
-            return true;
-          }
-        }
-        return false;
-      }, { timeout: 15000 });
-      console.log('[details] Details page loaded');
+      await page.waitForSelector('mat-dialog-container', { timeout: 15000 });
+      // Wait for content inside — label.value elements appear when data loads
+      await page.waitForSelector('mat-dialog-container label.value', { timeout: 10000 });
+      console.log('[details] Details dialog loaded');
     } catch {
-      console.log('[details] Timed out waiting for details page content');
+      console.log('[details] Timed out waiting for details dialog');
     }
 
     await page.waitForLoadState('networkidle').catch(() => {});
@@ -184,105 +168,179 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
   }
 }
 
+/**
+ * Extract details from the Material Dialog that opens after clicking View.
+ * The dialog uses:
+ * - label.label / label.value pairs for company info
+ * - mat-expansion-panel sections for each data category
+ * - lib-mns-universal-table with data-column attributes for tables
+ */
 async function extractDetailsFromPage(
   page: Page,
   fileNumber: string,
 ): Promise<CompanyDetails | null> {
-  // Log what page we're on for debugging
-  const pageInfo = await page.evaluate(() => ({
-    url: location.href,
-    title: document.title,
-    headings: Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6'))
-      .map(h => (h.textContent || '').trim().substring(0, 60))
-      .slice(0, 10),
-  }));
-  console.log('[details] Extracting from page:', JSON.stringify(pageInfo));
+  // Log dialog state for debugging
+  const dialogInfo = await page.evaluate(() => {
+    const dialog = document.querySelector('mat-dialog-container');
+    const title = document.querySelector('h2.mat-dialog-title');
+    const panels = Array.from(document.querySelectorAll('mat-panel-title'))
+      .map(p => (p.textContent || '').trim());
+    return {
+      hasDialog: !!dialog,
+      title: title?.textContent?.trim() || '',
+      panels,
+    };
+  });
+  console.log('[details] Dialog state:', JSON.stringify(dialogInfo));
+
+  if (!dialogInfo.hasDialog) {
+    console.log('[details] No dialog found on page');
+    return null;
+  }
 
   const details = await page.evaluate(function(fn) {
-    var result = {
-      companyName: '',
-      fileNumber: fn,
-      brn: undefined as string | undefined,
-      status: undefined as string | undefined,
-      type: undefined as string | undefined,
-      registrationDate: undefined as string | undefined,
-      registeredOffice: undefined as string | undefined,
-      natureOfBusiness: undefined as string | undefined,
-      directors: [] as Array<{ name: string; role: string; appointmentDate?: string; address?: string }>,
-      shareholders: [] as Array<{ name: string; role: string; appointmentDate?: string; address?: string }>,
-      secretaries: [] as Array<{ name: string; role: string; appointmentDate?: string; address?: string }>,
-    };
+    var dialog = document.querySelector('mat-dialog-container');
+    if (!dialog) return null;
 
-    function extractField(labels: string[]): string | undefined {
-      var allLabels = document.querySelectorAll('label, dt, th, strong, b, h6, [class*="label"], [class*="key"]');
-      for (var i = 0; i < allLabels.length; i++) {
-        var el = allLabels[i];
-        var text = (el.textContent || '').toLowerCase().trim();
-        for (var j = 0; j < labels.length; j++) {
-          if (text.includes(labels[j].toLowerCase())) {
-            var value = (el.nextElementSibling as HTMLElement)?.textContent?.trim() ||
-                        el.parentElement?.querySelector('dd, td, [class*="value"], span:not(:first-child)')?.textContent?.trim() ||
-                        el.parentElement?.nextElementSibling?.textContent?.trim();
-            if (value && value.length < 500) return value;
+    // Helper: get label.value text for a given label.label text
+    function getField(labelText: string): string | undefined {
+      var labels = dialog!.querySelectorAll('label.label');
+      for (var i = 0; i < labels.length; i++) {
+        var text = (labels[i].textContent || '').replace(':', '').trim().toLowerCase();
+        if (text === labelText.toLowerCase()) {
+          var valueLabel = labels[i].nextElementSibling;
+          if (valueLabel && valueLabel.classList.contains('value')) {
+            var val = (valueLabel.textContent || '').trim();
+            if (val) return val;
           }
         }
       }
       return undefined;
     }
 
-    result.companyName = extractField(['company name', 'name of company', 'entity name']) || '';
-    result.brn = extractField(['brn', 'business registration number']);
-    result.status = extractField(['status', 'company status']);
-    result.type = extractField(['type', 'company type', 'category']);
-    result.registrationDate = extractField(['registration date', 'date of incorporation', 'incorporated']);
-    result.registeredOffice = extractField(['registered office', 'address', 'office address']);
-    result.natureOfBusiness = extractField(['nature of business', 'business activity', 'principal activity']);
-
-    function extractPeople(sectionLabels: string[], role: string) {
-      var people: Array<{ name: string; role: string; appointmentDate?: string; address?: string }> = [];
-      var headers = document.querySelectorAll('h2, h3, h4, h5, [class*="section"], [class*="header"], [role="tab"]');
-      for (var h = 0; h < headers.length; h++) {
-        var headerText = (headers[h].textContent || '').toLowerCase();
-        var matches = false;
-        for (var s = 0; s < sectionLabels.length; s++) {
-          if (headerText.includes(sectionLabels[s].toLowerCase())) { matches = true; break; }
-        }
-        if (!matches) continue;
-        var nextEl = headers[h].nextElementSibling;
-        while (nextEl && !['H2', 'H3', 'H4'].includes(nextEl.tagName)) {
-          var rows = nextEl.querySelectorAll('tr, li, [class*="row"]');
-          for (var r = 0; r < rows.length; r++) {
-            var row = rows[r];
-            var nameCell = row.querySelector('td[data-column*="Name" i], td:first-child');
-            var dateCell = row.querySelector('td[data-column*="Date" i], td:nth-child(2)');
-            var addrCell = row.querySelector('td[data-column*="Address" i], td:nth-child(3)');
-            var name = nameCell?.textContent?.trim();
-            if (name && name.length > 1) {
-              people.push({
-                name: name,
-                role: role,
-                appointmentDate: dateCell?.textContent?.trim() || undefined,
-                address: addrCell?.textContent?.trim() || undefined,
-              });
-            }
-          }
-          nextEl = nextEl.nextElementSibling;
+    // Helper: find expansion panel by title, return its table rows
+    function getPanelTableRows(panelTitle: string): Element[] {
+      var panels = dialog!.querySelectorAll('mat-expansion-panel');
+      for (var i = 0; i < panels.length; i++) {
+        var title = panels[i].querySelector('mat-panel-title');
+        if (title && (title.textContent || '').trim().toUpperCase().includes(panelTitle.toUpperCase())) {
+          return Array.from(panels[i].querySelectorAll('tbody tr'));
         }
       }
-      return people;
+      return [];
     }
 
-    result.directors = extractPeople(['director'], 'Director');
-    result.shareholders = extractPeople(['shareholder', 'member'], 'Shareholder');
-    result.secretaries = extractPeople(['secretary'], 'Secretary');
+    // Helper: get cell text by data-column attribute
+    function cellText(row: Element, column: string): string | undefined {
+      var cell = row.querySelector('td[data-column="' + column + '"]');
+      var text = cell?.textContent?.trim();
+      return text || undefined;
+    }
+
+    // --- COMPANY DETAILS ---
+    var companyName = getField('Name') || '';
+    var result: any = {
+      companyName: companyName,
+      fileNumber: getField('File No.') || fn,
+      status: getField('Status'),
+      type: getField('Type'),
+      nature: getField('Nature'),
+      category: getField('Category'),
+      subCategory: getField('Sub-category'),
+      registrationDate: getField('Date Incorporated/Registered'),
+      registeredOffice: getField('Registered Office Address'),
+      effectiveDateRegisteredOffice: getField('Effective Date for Registered Office Address'),
+      directors: [] as any[],
+      shareholders: [] as any[],
+      secretaries: [] as any[],
+    };
+
+    // --- BUSINESS DETAILS ---
+    var bizRows = getPanelTableRows('BUSINESS DETAILS');
+    var businessDetails: any[] = [];
+    for (var b = 0; b < bizRows.length; b++) {
+      var brn = cellText(bizRows[b], 'Business Registration No.');
+      var bizName = cellText(bizRows[b], 'Business Name');
+      if (brn || bizName) {
+        businessDetails.push({
+          brn: brn,
+          businessName: bizName,
+          natureOfBusiness: cellText(bizRows[b], 'Nature of Business'),
+          businessAddress: cellText(bizRows[b], 'Business Address'),
+        });
+      }
+    }
+    result.businessDetails = businessDetails;
+    // Set top-level BRN and natureOfBusiness from first business detail
+    if (businessDetails.length > 0) {
+      result.brn = businessDetails[0].brn;
+      result.natureOfBusiness = businessDetails[0].natureOfBusiness;
+    }
+
+    // --- STATED CAPITAL ---
+    var capRows = getPanelTableRows('PARTICULARS OF STATED CAPITAL');
+    var statedCapital: any[] = [];
+    for (var c = 0; c < capRows.length; c++) {
+      statedCapital.push({
+        typeOfShares: cellText(capRows[c], 'Type of Shares'),
+        numberOfShares: cellText(capRows[c], 'No. of Shares'),
+        currency: cellText(capRows[c], 'Currency'),
+        statedCapital: cellText(capRows[c], 'Stated Capital'),
+        amountUnpaid: cellText(capRows[c], 'Amount Unpaid'),
+        parValue: cellText(capRows[c], 'Par Value'),
+      });
+    }
+    result.statedCapital = statedCapital;
+
+    // --- OFFICE BEARERS (directors + secretaries in one table) ---
+    var bearerRows = getPanelTableRows('OFFICE BEARERS');
+    for (var o = 0; o < bearerRows.length; o++) {
+      var position = (cellText(bearerRows[o], 'Position') || '').toUpperCase();
+      var name = cellText(bearerRows[o], 'Name');
+      if (!name) continue;
+      var person = {
+        name: name,
+        role: position,
+        appointmentDate: cellText(bearerRows[o], 'Appointed Date'),
+        address: cellText(bearerRows[o], 'Address'),
+      };
+      if (position.includes('DIRECTOR')) {
+        result.directors.push(person);
+      } else if (position.includes('SECRETARY')) {
+        result.secretaries.push(person);
+      } else {
+        // Other office bearers go to directors by default
+        result.directors.push(person);
+      }
+    }
+
+    // --- SHAREHOLDERS ---
+    var shRows = getPanelTableRows('SHAREHOLDERS');
+    for (var s = 0; s < shRows.length; s++) {
+      var shName = cellText(shRows[s], 'Name');
+      if (!shName) continue;
+      result.shareholders.push({
+        name: shName,
+        numberOfShares: cellText(shRows[s], 'No. of Shares'),
+        typeOfShares: cellText(shRows[s], 'Type of Shares'),
+        currency: cellText(shRows[s], 'Currency'),
+      });
+    }
 
     return result;
   }, fileNumber);
 
-  if (details.companyName && !details.companyName.toLowerCase().includes('make a search')) {
+  if (!details) {
+    console.log('[details] Extraction returned null');
+    return null;
+  }
+
+  if (details.companyName) {
+    console.log('[details] Extracted:', details.companyName, '- directors:', details.directors.length,
+      'shareholders:', details.shareholders.length, 'secretaries:', details.secretaries.length);
     return details as CompanyDetails;
   }
 
-  console.log('[details] Page appears to be search page, not details');
+  console.log('[details] No company name found in dialog');
   return null;
 }
