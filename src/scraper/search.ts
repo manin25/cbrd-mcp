@@ -11,14 +11,12 @@ const CBRD_URL = 'https://onlinesearch.mns.mu/';
 export async function searchCompany(query: string, maxResults: number = 20): Promise<CompanySearchResult[]> {
   const page = await browserManager.getPage();
 
-  // Ensure we're on the search page with a working form.
-  // After details/person searches, overlays (spinner/Turnstile) may block interaction.
+  // Always navigate fresh to ensure clean state (previous tool calls may leave
+  // Turnstile overlays or Angular sub-routes that block interaction)
+  await page.goto(CBRD_URL, { waitUntil: browserManager.waitUntil });
   const searchInput = page.locator('#company-partnership-text-field');
-  if (!await searchInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await page.goto(CBRD_URL, { waitUntil: browserManager.waitUntil });
-    if (!await searchInput.isVisible({ timeout: 5000 }).catch(() => false)) {
-      throw new Error('Could not find search input on CBRD page. The page structure may have changed.');
-    }
+  if (!await searchInput.isVisible({ timeout: 5000 }).catch(() => false)) {
+    throw new Error('Could not find search input on CBRD page. The page structure may have changed.');
   }
 
   // Only click the Company/Partnership Name radio if it's not already selected.
