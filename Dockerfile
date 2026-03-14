@@ -11,12 +11,17 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Install dependencies
+# Install all dependencies (including dev for build)
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci
 
-# Copy built application
-COPY dist/ ./dist/
+# Copy source and build
+COPY tsconfig.json ./
+COPY src/ ./src/
+RUN npm run build
+
+# Remove dev dependencies
+RUN npm prune --omit=dev
 
 EXPOSE 8080
 
