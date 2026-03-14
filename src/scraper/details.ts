@@ -145,14 +145,30 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
       return rows[0].querySelector('td[data-column="Name"]') !== null;
     }, { timeout: 15000 });
 
-    // Click View — Turnstile token should be active, no CAPTCHA this time
+    // Click View — try multiple strategies to trigger Angular's handler
     console.log('[details] Clicking View icon (post-CAPTCHA)');
-    const viewIconRetry = page.locator('fa-icon[title="View"]').first();
-    await viewIconRetry.waitFor({ timeout: 5000 });
-    const actionBtnRetry = viewIconRetry.locator('xpath=ancestor::div[contains(@class,"action-btn")]').first();
-    if (await actionBtnRetry.count() > 0) {
-      await actionBtnRetry.click();
-    } else {
+
+    // Strategy 1: Use page.evaluate to click via DOM (runs inside Angular's zone)
+    const clicked = await page.evaluate(() => {
+      const viewIcon = document.querySelector('fa-icon[title="View"]');
+      if (!viewIcon) return 'no-icon';
+      // Try clicking the ancestor action-btn div first
+      const actionDiv = viewIcon.closest('[class*="action-btn"]');
+      if (actionDiv) {
+        (actionDiv as HTMLElement).click();
+        return 'action-div';
+      }
+      // Try clicking the icon itself
+      (viewIcon as HTMLElement).click();
+      return 'icon';
+    });
+    console.log('[details] Click strategy used:', clicked);
+
+    // If DOM click didn't work, try Playwright click as fallback
+    if (clicked === 'no-icon') {
+      console.log('[details] No View icon found via DOM — trying Playwright click');
+      const viewIconRetry = page.locator('fa-icon[title="View"]').first();
+      await viewIconRetry.waitFor({ timeout: 5000 });
       await viewIconRetry.click();
     }
 
