@@ -10,10 +10,10 @@ export async function searchPerson(name: string, role?: string): Promise<PersonS
   const page = await browserManager.getPage();
 
   if (!page.url().includes('onlinesearch.mns.mu')) {
-    await page.goto(CBRD_URL, { waitUntil: 'networkidle' });
+    await page.goto(CBRD_URL, { waitUntil: browserManager.waitUntil });
   }
 
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState(browserManager.waitUntil);
 
   // Try to find a person search tab/section
   const personTab = page.locator('[data-tab*="person"], [class*="person"], a:has-text("Person"), button:has-text("Person"), label:has-text("Person"), [role="tab"]:has-text("Person"), option:has-text("Person")');
@@ -48,7 +48,7 @@ export async function searchPerson(name: string, role?: string): Promise<PersonS
   }
 
   // Wait for results
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState(browserManager.waitUntil);
   await page.waitForTimeout(2000);
 
   // Extract results

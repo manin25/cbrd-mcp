@@ -8,6 +8,7 @@ export class BrowserManager {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private initializing: Promise<Page> | null = null;
+  private isCDP = false;
 
   async getPage(): Promise<Page> {
     if (this.page && !this.page.isClosed()) {
@@ -38,16 +39,17 @@ export class BrowserManager {
       // Connect to Lightpanda (or any CDP-compatible browser) via WebSocket/HTTP
       console.log(`Connecting to CDP browser at ${cdpUrl}`);
       this.browser = await chromium.connectOverCDP(cdpUrl);
+      this.isCDP = true;
       // Lightpanda doesn't support Target.createBrowserContext or Emulation.setUserAgentOverride,
-      // so use the default browser context and its existing page (or create one without custom UA)
+      // so use the default browser context and create a fresh page (existing pages may be stale)
       const contexts = this.browser.contexts();
       this.context = contexts[0] ?? await this.browser.newContext();
-      const pages = this.context.pages();
-      this.page = pages[0] ?? await this.context.newPage();
+      this.page = await this.context.newPage();
     } else {
       // Launch local Chromium (for development)
       console.log('Launching local Chromium browser');
       this.browser = await chromium.launch({ headless: true });
+      this.isCDP = false;
       this.context = await this.browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       });
@@ -57,7 +59,7 @@ export class BrowserManager {
     this.page.setDefaultNavigationTimeout(30_000);
 
     // Navigate to CBRD and handle cookie consent
-    await this.page.goto(CBRD_URL, { waitUntil: 'networkidle' });
+    await this.page.goto(CBRD_URL, { waitUntil: this.waitUntil });
     await dismissCookieConsent(this.page);
 
     return this.page;
@@ -67,7 +69,7 @@ export class BrowserManager {
     const page = await this.getPage();
     const currentUrl = page.url();
     if (!currentUrl.startsWith(url)) {
-      await page.goto(url, { waitUntil: 'networkidle' });
+      await page.goto(url, { waitUntil: this.waitUntil });
     }
     return page;
   }
@@ -91,6 +93,11 @@ export class BrowserManager {
     this.page = null;
     this.context = null;
     this.browser = null;
+  }
+
+  /** Returns the appropriate wait strategy: 'load' for Lightpanda CDP, 'networkidle' for Chromium */
+  get waitUntil(): 'load' | 'networkidle' {
+    return this.isCDP ? 'load' : 'networkidle';
   }
 
   async shutdown(): Promise<void> {

@@ -12,7 +12,7 @@ export async function getCompanyDetails(fileNumber: string): Promise<CompanyDeta
   await navigateToCompanyDetails(page, fileNumber);
 
   // Wait for details to load
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState(browserManager.waitUntil);
   await page.waitForTimeout(2000);
 
   // Extract all available details
@@ -26,7 +26,7 @@ async function navigateToCompanyDetails(page: Page, fileNumber: string): Promise
   const fileLink = page.locator(`a:has-text("${fileNumber}"), td:has-text("${fileNumber}"), [class*="file"]:has-text("${fileNumber}")`);
   if (await fileLink.first().isVisible({ timeout: 3000 }).catch(() => false)) {
     await fileLink.first().click();
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState(browserManager.waitUntil);
     return;
   }
 
@@ -38,7 +38,7 @@ async function navigateToCompanyDetails(page: Page, fileNumber: string): Promise
   const resultLink = page.locator('table tbody tr a, .mat-row a, tr[class*="row"] a, table tbody tr td').first();
   if (await resultLink.isVisible({ timeout: 5000 }).catch(() => false)) {
     await resultLink.click();
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState(browserManager.waitUntil);
   }
 }
 

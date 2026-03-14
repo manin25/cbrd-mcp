@@ -15,7 +15,7 @@ export async function getFinancialInfo(fileNumber: string): Promise<FinancialInf
   const financialsTab = page.locator('[data-tab*="financial" i], [class*="financial" i], a:has-text("Financial"), button:has-text("Financial"), [role="tab"]:has-text("Financial"), a:has-text("Annual Return"), button:has-text("Annual Return")');
   if (await financialsTab.first().isVisible({ timeout: 3000 }).catch(() => false)) {
     await financialsTab.first().click();
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState(browserManager.waitUntil);
     await page.waitForTimeout(2000);
   }
 

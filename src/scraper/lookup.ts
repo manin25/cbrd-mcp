@@ -15,10 +15,10 @@ export async function lookupCompany(fileNumber?: string, brn?: string): Promise<
 
   // Navigate to the search page
   if (!page.url().includes('onlinesearch.mns.mu')) {
-    await page.goto(CBRD_URL, { waitUntil: 'networkidle' });
+    await page.goto(CBRD_URL, { waitUntil: browserManager.waitUntil });
   }
 
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState(browserManager.waitUntil);
 
   // Try to find a file number / BRN specific search field
   const searchQuery = fileNumber || brn || '';

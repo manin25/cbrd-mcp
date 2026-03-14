@@ -12,11 +12,11 @@ export async function searchCompany(query: string, maxResults: number = 20): Pro
 
   // Ensure we're on the search page
   if (!page.url().includes('onlinesearch.mns.mu')) {
-    await page.goto(CBRD_URL, { waitUntil: 'networkidle' });
+    await page.goto(CBRD_URL, { waitUntil: browserManager.waitUntil });
   }
 
   // Wait for the page to be interactive
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState(browserManager.waitUntil);
 
   // Find and fill the search input
   const searchInput = await findSearchInput(page);
@@ -111,7 +111,7 @@ async function waitForResults(page: Page) {
   ];
 
   // First wait for network to settle
-  await page.waitForLoadState('networkidle').catch(() => {});
+  await page.waitForLoadState(browserManager.waitUntil).catch(() => {});
 
   // Then try to find result elements
   for (const selector of resultSelectors) {
