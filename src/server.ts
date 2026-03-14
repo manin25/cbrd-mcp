@@ -3,10 +3,8 @@ import { z } from 'zod';
 import { searchCompany } from './scraper/search.js';
 import { lookupCompany } from './scraper/lookup.js';
 import { getCompanyDetails } from './scraper/details.js';
-import { searchPerson } from './scraper/person-search.js';
-import { getFinancialInfo } from './scraper/financials.js';
 import { getCached, setCache } from './cache.js';
-import type { CompanySearchResult, CompanyDetails, PersonSearchResult, FinancialInfo } from './types.js';
+import type { CompanySearchResult, CompanyDetails } from './types.js';
 
 export function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -106,72 +104,6 @@ export function createMcpServer(): McpServer {
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         return { content: [{ type: 'text', text: `Error getting company details: ${msg}` }], isError: true };
-      }
-    },
-  );
-
-  // Tool 4: Search for a person
-  server.tool(
-    'cbrd_search_person',
-    "Search for a person's name across Mauritius CBRD company records to find companies they are associated with as director, shareholder, or secretary.",
-    {
-      name: z.string().min(1).describe("Person's name to search"),
-      role: z.enum(['director', 'shareholder', 'secretary', 'all']).optional().default('all').describe('Filter by role'),
-    },
-    async ({ name, role }) => {
-      try {
-        const params = { name, role };
-        const cached = getCached<PersonSearchResult[]>('cbrd_search_person', params);
-        if (cached) {
-          return { content: [{ type: 'text', text: JSON.stringify(cached, null, 2) }] };
-        }
-
-        const results = await searchPerson(name, role);
-        setCache('cbrd_search_person', params, results);
-
-        if (results.length === 0) {
-          return { content: [{ type: 'text', text: `No records found for person "${name}"${role !== 'all' ? ` with role "${role}"` : ''}.` }] };
-        }
-
-        return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        return { content: [{ type: 'text', text: `Error searching for person: ${msg}` }], isError: true };
-      }
-    },
-  );
-
-  // Tool 5: Get financial info
-  server.tool(
-    'cbrd_financial_info',
-    'Retrieve financial information for a company from the Mauritius CBRD free search, if available.',
-    {
-      file_number: z.string().min(1).describe('The company file number'),
-    },
-    async ({ file_number }) => {
-      try {
-        const params = { file_number };
-        const cached = getCached<FinancialInfo>('cbrd_financial_info', params);
-        if (cached) {
-          return { content: [{ type: 'text', text: JSON.stringify(cached, null, 2) }] };
-        }
-
-        const info = await getFinancialInfo(file_number);
-        setCache('cbrd_financial_info', params, info, true);
-
-        if (info.financialStatements.length === 0) {
-          return {
-            content: [{
-              type: 'text',
-              text: `No financial information available for ${info.companyName} (${file_number}) on the free CBRD search. Financial details may require the paid CBRIS service.`,
-            }],
-          };
-        }
-
-        return { content: [{ type: 'text', text: JSON.stringify(info, null, 2) }] };
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        return { content: [{ type: 'text', text: `Error getting financial info: ${msg}` }], isError: true };
       }
     },
   );

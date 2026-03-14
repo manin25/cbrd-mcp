@@ -18,7 +18,6 @@ export interface CompanyDetails {
   directors: PersonRole[];
   shareholders: PersonRole[];
   secretaries: PersonRole[];
-  annualReturns?: AnnualReturn[];
 }
 
 export interface PersonRole {
@@ -26,33 +25,6 @@ export interface PersonRole {
   role: string;
   appointmentDate?: string;
   address?: string;
-}
-
-export interface PersonSearchResult {
-  personName: string;
-  role: string;
-  companyName: string;
-  fileNumber: string;
-  appointmentDate?: string;
-}
-
-export interface FinancialInfo {
-  fileNumber: string;
-  companyName: string;
-  financialStatements: FinancialStatement[];
-}
-
-export interface FinancialStatement {
-  year: string;
-  filingDate?: string;
-  type?: string;
-  status?: string;
-}
-
-export interface AnnualReturn {
-  year: string;
-  filingDate?: string;
-  status?: string;
 }
 
 export interface SearchParams {
