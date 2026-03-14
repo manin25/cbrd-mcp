@@ -84,6 +84,12 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
       body: JSON.stringify({ query: bqlQuery }),
     });
 
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.log(`[details] BQL HTTP ${resp.status}: ${text.substring(0, 200)}`);
+      return null;
+    }
+
     const json = await resp.json();
     console.log('[details] BQL response:', JSON.stringify({
       status: json.data?.goto?.status,
