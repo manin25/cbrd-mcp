@@ -64,20 +64,21 @@ async function tryClickViewAndExtract(
       return null;
     }
 
-    // Click View using JS dispatchEvent (Angular zone-aware, avoids pointer intercept issues)
-    console.log('[details] Clicking View icon via dispatchEvent...');
-    await viewIcon.evaluate((el) => {
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    // Use Playwright's real .click() to trigger Angular's zone.js handler.
+    // This WILL cause the Turnstile overlay (cbris-turnstile) to appear and
+    // intercept pointer events — that's expected. The click will "fail" with
+    // a timeout, but Angular has already started the navigation + Turnstile flow.
+    console.log('[details] Clicking View icon (real click, expecting Turnstile intercept)...');
+    await viewIcon.click({ timeout: 5000 }).catch((err: any) => {
+      console.log('[details] Click intercepted (expected):', String(err).substring(0, 200));
     });
 
-    // After click, Angular shows a Turnstile verification overlay (cbris-turnstile)
-    // that intercepts all pointer events. We need to wait for it to auto-solve.
-    console.log('[details] Waiting for Turnstile overlay to appear...');
-    await page.waitForTimeout(1000);
+    // Now wait for the Turnstile overlay to appear and then auto-resolve
+    console.log('[details] Checking for Turnstile overlay...');
+    await page.waitForTimeout(500);
 
-    // Check if Turnstile overlay appeared
     const turnstileSelector = 'cbris-turnstile';
-    const hasTurnstile = await page.locator(turnstileSelector).first().isVisible({ timeout: 3000 }).catch(() => false);
+    const hasTurnstile = await page.locator(turnstileSelector).first().isVisible({ timeout: 5000 }).catch(() => false);
     console.log('[details] Turnstile overlay visible:', hasTurnstile);
 
     if (hasTurnstile) {
