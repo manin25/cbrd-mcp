@@ -38,17 +38,21 @@ export class BrowserManager {
       // Connect to Lightpanda (or any CDP-compatible browser) via WebSocket/HTTP
       console.log(`Connecting to CDP browser at ${cdpUrl}`);
       this.browser = await chromium.connectOverCDP(cdpUrl);
+      // Lightpanda doesn't support Target.createBrowserContext or Emulation.setUserAgentOverride,
+      // so use the default browser context and its existing page (or create one without custom UA)
+      const contexts = this.browser.contexts();
+      this.context = contexts[0] ?? await this.browser.newContext();
+      const pages = this.context.pages();
+      this.page = pages[0] ?? await this.context.newPage();
     } else {
       // Launch local Chromium (for development)
       console.log('Launching local Chromium browser');
       this.browser = await chromium.launch({ headless: true });
+      this.context = await this.browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      });
+      this.page = await this.context.newPage();
     }
-
-    this.context = await this.browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    });
-
-    this.page = await this.context.newPage();
     this.page.setDefaultTimeout(30_000);
     this.page.setDefaultNavigationTimeout(30_000);
 
