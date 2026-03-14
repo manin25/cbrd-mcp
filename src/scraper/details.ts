@@ -6,15 +6,16 @@ import type { CompanyDetails } from '../types.js';
 /**
  * Get full details for a company by file number.
  *
- * Workflow: first looks up the company to get basic info from search results,
- * then attempts to click the "View" icon from those results to navigate to
- * the details page for directors/shareholders/secretaries.
+ * Workflow:
+ * 1. Look up the company via file number to populate search results
+ * 2. Click the View icon — this triggers a Turnstile verification overlay
+ * 3. Wait for Turnstile to auto-solve (patchright stealth handles this)
+ * 4. Extract directors, shareholders, secretaries from the details page
  */
 export async function getCompanyDetails(fileNumber: string): Promise<CompanyDetails> {
   // Step 1: Look up the company to populate search results on the page
   const searchResults = await lookupCompany(fileNumber, undefined);
 
-  // Build base details from search results
   const match = searchResults.find(r => r.fileNumber === fileNumber) || searchResults[0];
   const baseDetails: CompanyDetails = {
     companyName: match?.companyName || '',
@@ -30,11 +31,10 @@ export async function getCompanyDetails(fileNumber: string): Promise<CompanyDeta
     return baseDetails;
   }
 
-  // Step 2: Try clicking View icon from the search results already on page
+  // Step 2: Click View and extract details
   const page = await browserManager.getPage();
   const extraDetails = await tryClickViewAndExtract(page, fileNumber);
 
-  // Merge any extra details from the details page into base
   if (extraDetails) {
     return {
       ...baseDetails,
@@ -57,111 +57,90 @@ async function tryClickViewAndExtract(
   fileNumber: string,
 ): Promise<CompanyDetails | null> {
   try {
-    // The search results should still be on the page from lookupCompany
+    // Find the View icon in search results
     const viewIcon = page.locator('fa-icon[title="View"]').first();
     if (!await viewIcon.isVisible({ timeout: 3000 }).catch(() => false)) {
-      console.log('View icon not found on search results page');
+      console.log('[details] View icon not found on search results page');
       return null;
     }
 
-    // Capture network requests made after clicking View
-    const networkRequests: string[] = [];
-    const onRequest = (req: any) => {
-      const url = req.url();
-      if (!url.includes('google') && !url.includes('analytics') && !url.includes('.js') && !url.includes('.css')) {
-        networkRequests.push(`${req.method()} ${url}`);
-      }
-    };
-    page.on('request', onRequest);
-
-    // Listen for popup/new tab
-    const popupPromise = page.context().waitForEvent('page', { timeout: 8000 }).catch(() => null);
-
-    // Strategy 1: Try JavaScript dispatchEvent with bubbling (Angular zone-aware)
-    console.log('[details] Attempting JS dispatchEvent on View icon...');
-    const urlBefore = page.url();
+    // Click View using JS dispatchEvent (Angular zone-aware, avoids pointer intercept issues)
+    console.log('[details] Clicking View icon via dispatchEvent...');
     await viewIcon.evaluate((el) => {
-      // Dispatch in Angular's zone by using native click event
       el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     });
+
+    // After click, Angular shows a Turnstile verification overlay (cbris-turnstile)
+    // that intercepts all pointer events. We need to wait for it to auto-solve.
+    console.log('[details] Waiting for Turnstile overlay to appear...');
+    await page.waitForTimeout(1000);
+
+    // Check if Turnstile overlay appeared
+    const turnstileSelector = 'cbris-turnstile';
+    const hasTurnstile = await page.locator(turnstileSelector).first().isVisible({ timeout: 3000 }).catch(() => false);
+    console.log('[details] Turnstile overlay visible:', hasTurnstile);
+
+    if (hasTurnstile) {
+      // Wait for Turnstile to auto-solve and disappear (patchright stealth should handle this)
+      console.log('[details] Waiting for Turnstile to auto-solve (up to 30s)...');
+      try {
+        await page.waitForFunction(() => {
+          const el = document.querySelector('cbris-turnstile');
+          if (!el) return true;
+          // Check if it's been removed or hidden
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return true;
+          // Check if it no longer has the overlay div
+          const overlay = el.querySelector('.d-flex.justify-content-center.align-items-center');
+          if (!overlay) return true;
+          const overlayStyle = window.getComputedStyle(overlay);
+          return overlayStyle.display === 'none' || overlayStyle.visibility === 'hidden';
+        }, { timeout: 30_000 });
+        console.log('[details] Turnstile resolved!');
+      } catch {
+        console.log('[details] Turnstile did NOT resolve within 30s');
+        // Log Turnstile state for debugging
+        const turnstileState = await page.evaluate(() => {
+          const el = document.querySelector('cbris-turnstile');
+          if (!el) return 'not found';
+          return {
+            outerHTML: el.outerHTML.substring(0, 500),
+            childCount: el.children.length,
+            iframeCount: el.querySelectorAll('iframe').length,
+            iframeSrc: Array.from(el.querySelectorAll('iframe')).map(f => (f as HTMLIFrameElement).src).join(', '),
+          };
+        });
+        console.log('[details] Turnstile state after timeout:', JSON.stringify(turnstileState));
+        return null;
+      }
+    }
+
+    // Wait for details page content to load
     await page.waitForTimeout(2000);
-
-    let urlAfter = page.url();
-    console.log('[details] URL after dispatchEvent:', urlAfter);
-
-    // If URL didn't change, try Strategy 2: click parent DIV.action-btn-div
-    if (urlAfter === urlBefore) {
-      console.log('[details] dispatchEvent did not navigate. Trying parent div click...');
-      const parentDiv = page.locator('div.action-btn-div').first();
-      if (await parentDiv.isVisible({ timeout: 1000 }).catch(() => false)) {
-        await parentDiv.click();
-        await page.waitForTimeout(2000);
-        urlAfter = page.url();
-        console.log('[details] URL after parent div click:', urlAfter);
-      }
-    }
-
-    // If still no navigation, try Strategy 3: Playwright .click() with force
-    if (urlAfter === urlBefore) {
-      console.log('[details] Parent div click did not navigate. Trying force click on icon...');
-      await viewIcon.click({ force: true });
-      await page.waitForTimeout(2000);
-      urlAfter = page.url();
-      console.log('[details] URL after force click:', urlAfter);
-    }
-
-    // If STILL no navigation, try Strategy 4: click the table row itself
-    if (urlAfter === urlBefore) {
-      console.log('[details] Force click did not navigate. Trying table row click...');
-      const row = page.locator('lib-mns-universal-table table tbody tr').first();
-      if (await row.isVisible({ timeout: 1000 }).catch(() => false)) {
-        await row.click();
-        await page.waitForTimeout(2000);
-        urlAfter = page.url();
-        console.log('[details] URL after row click:', urlAfter);
-      }
-    }
-
-    // Log all network requests captured
-    page.off('request', onRequest);
-    console.log('[details] Network requests after click:', JSON.stringify(networkRequests));
-
-    // Check for popup
-    const popup = await popupPromise;
-    if (popup) {
-      console.log('[details] NEW TAB/POPUP detected! URL:', popup.url());
-      await popup.waitForLoadState('networkidle').catch(() => {});
-      console.log('[details] Popup loaded, final URL:', popup.url());
-
-      // Extract from popup page
-      const popupDetails = await extractDetailsFromPage(popup, fileNumber);
-      await popup.close().catch(() => {});
-      return popupDetails;
-    }
-
-    // Wait for page to settle
     await page.waitForLoadState(browserManager.waitUntil).catch(() => {});
 
-    // Dump final page state for debugging
-    const pageDebug = await page.evaluate(() => ({
+    // Log final page state
+    const pageState = await page.evaluate(() => ({
       url: location.href,
       title: document.title,
-      bodyText: document.body.innerText.substring(0, 500),
-      headingCount: document.querySelectorAll('h1,h2,h3,h4,h5,h6').length,
+      headings: Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6'))
+        .map(h => `${h.tagName}: "${(h.textContent || '').trim().substring(0, 80)}"`)
+        .slice(0, 15),
+      bodyLength: document.body.innerHTML.length,
     }));
-    console.log('[details] Final page state:', JSON.stringify(pageDebug));
+    console.log('[details] Page state after Turnstile:', JSON.stringify(pageState));
 
-    // Check if we actually navigated away from the search page
+    // Check if we're still on the search page
     const isStillSearchPage = await page.locator('h6:has-text("Make a Search")').isVisible({ timeout: 1000 }).catch(() => false);
     if (isStillSearchPage) {
-      console.log('[details] Still on search page — View click did not navigate');
+      console.log('[details] Still on search page after Turnstile — navigation failed');
       return null;
     }
 
-    // We navigated! Extract details
+    // We navigated to the details page! Extract everything.
     return await extractDetailsFromPage(page, fileNumber);
   } catch (err) {
-    console.log('Failed to extract details page:', err);
+    console.log('[details] Failed to extract details:', err);
     return null;
   }
 }
@@ -170,7 +149,6 @@ async function extractDetailsFromPage(
   page: Page,
   fileNumber: string,
 ): Promise<CompanyDetails | null> {
-  // Inject __name polyfill for esbuild/tsx compatibility
   await page.evaluate(() => { (window as any).__name = (fn: any) => fn; });
 
   const details = await page.evaluate(function(fn) {
