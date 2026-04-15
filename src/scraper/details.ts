@@ -85,6 +85,16 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
       captchaResolve?.();
     });
 
+    // Monitor network requests to understand what happens when View is clicked
+    const apiCalls: { url: string; status: number; method: string }[] = [];
+    page.on('response', (response) => {
+      const url = response.url();
+      if (url.includes('/api/') || url.includes('/cbris/') || url.includes('/company') || url.includes('/details')) {
+        apiCalls.push({ url, status: response.status(), method: response.request().method() });
+        console.log(`[details] API: ${response.request().method()} ${response.status()} ${url.substring(0, 120)}`);
+      }
+    });
+
     // Navigate to CBRD
     await page.goto(CBRD_URL, { waitUntil: 'networkidle' });
 
@@ -111,41 +121,57 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
       return rows[0].querySelector('td[data-column="Name"]') !== null;
     }, { timeout: 15000 });
 
-    // Click the View icon — try the parent action-btn div first (Angular handler target)
+    console.log('[details] Search results loaded, API calls so far:', apiCalls.length);
+
+    // Click the View icon
     const viewIcon = page.locator('fa-icon[title="View"]').first();
     await viewIcon.waitFor({ timeout: 5000 });
-    const actionBtn = viewIcon.locator('xpath=ancestor::div[contains(@class,"action-btn")]').first();
-    if (await actionBtn.count() > 0) {
-      await actionBtn.click();
-    } else {
-      await viewIcon.click();
-    }
+    await viewIcon.click();
+    console.log('[details] View clicked (first time)');
 
     // Wait for CAPTCHA to be solved (or 30s timeout if none appears)
     console.log('[details] Waiting for CAPTCHA resolution...');
     await captchaPromise;
 
-    // After CAPTCHA solved, DON'T reload — the Turnstile token lives in JS memory.
-    // Reloading destroys it. Instead, wait for the dialog to appear (the original
-    // View click should complete once Turnstile validates).
-    console.log('[details] CAPTCHA resolved — waiting for dialog...');
-    await page.waitForTimeout(2000);
+    // After CAPTCHA solved, DON'T reload — Turnstile token is in JS memory.
+    // Wait for the dialog — Turnstile may have unblocked the pending API call.
+    console.log('[details] CAPTCHA resolved — checking page state...');
 
-    // Check if the dialog appeared automatically after Turnstile validated
-    let hasDialog = await page.evaluate(() => !!document.querySelector('mat-dialog-container'));
+    // Log Turnstile state
+    const turnstileState = await page.evaluate(() => {
+      const iframe = document.querySelector('iframe[src*="turnstile"]');
+      const cfInput = document.querySelector('[name="cf-turnstile-response"]') as HTMLInputElement;
+      const results = document.querySelectorAll('lib-mns-universal-table table tbody tr');
+      return {
+        hasTurnstileIframe: !!iframe,
+        hasCfToken: !!cfInput,
+        cfTokenLength: cfInput?.value?.length || 0,
+        resultRows: results.length,
+        hasResultData: results.length > 0 && !!results[0].querySelector('td[data-column="Name"]'),
+      };
+    });
+    console.log('[details] Turnstile state:', JSON.stringify(turnstileState));
+
+    // Wait up to 5s for dialog to appear (original click may complete after Turnstile)
+    let hasDialog = false;
+    try {
+      await page.waitForSelector('mat-dialog-container', { timeout: 5000 });
+      hasDialog = true;
+      console.log('[details] Dialog appeared after CAPTCHA solve!');
+    } catch {
+      console.log('[details] No dialog after 5s — will re-click View');
+    }
 
     if (!hasDialog) {
-      // Dialog didn't open — re-click View on the SAME page (no reload!)
-      console.log('[details] Dialog not open yet — re-clicking View');
-
       // Check if search results are still visible
       const hasResults = await page.evaluate(() => {
         const rows = document.querySelectorAll('lib-mns-universal-table table tbody tr');
         return rows.length > 0 && !!rows[0].querySelector('td[data-column="Name"]');
       });
+      console.log('[details] Results still visible:', hasResults);
 
       if (!hasResults) {
-        // Results disappeared (rare) — redo search WITHOUT reloading page
+        // Results disappeared — redo search WITHOUT reloading page
         console.log('[details] Results gone — redoing search in-place');
         await page.fill('#company-partnership-text-field', '');
         await page.click('#fileNo');
@@ -158,27 +184,39 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
         }, { timeout: 15000 });
       }
 
-      // Click View via Playwright — proper event dispatch through Angular's zone
+      // Re-click View and watch for API calls
+      const apiCountBefore = apiCalls.length;
       const viewIconRetry = page.locator('fa-icon[title="View"]').first();
       await viewIconRetry.waitFor({ timeout: 5000 });
-      await viewIconRetry.click({ force: true });
+      await viewIconRetry.click();
       console.log('[details] View re-clicked');
-    }
 
-    // Wait for the Material Dialog to appear
-    try {
-      await page.waitForSelector('mat-dialog-container', { timeout: 15000 });
-      console.log('[details] Dialog opened!');
-    } catch {
-      console.log('[details] Dialog still not open — logging state');
-      const state = await page.evaluate(() => ({
-        url: location.href,
-        hasDialog: !!document.querySelector('mat-dialog-container'),
-        hasOverlay: !!document.querySelector('.cdk-overlay-container .cdk-overlay-pane'),
-        hasTurnstile: !!document.querySelector('iframe[src*="turnstile"]'),
-        bodyText: document.body.innerText.substring(0, 500),
-      }));
-      console.log('[details] State:', JSON.stringify(state));
+      // Wait a few seconds to see if any API call fires
+      await page.waitForTimeout(3000);
+      console.log('[details] API calls after re-click:', apiCalls.length - apiCountBefore);
+
+      // Try waiting for dialog
+      try {
+        await page.waitForSelector('mat-dialog-container', { timeout: 10000 });
+        hasDialog = true;
+        console.log('[details] Dialog opened after re-click!');
+      } catch {
+        // Last resort: log comprehensive state
+        const state = await page.evaluate(() => {
+          const overlayContainer = document.querySelector('.cdk-overlay-container');
+          const overlayPanes = overlayContainer?.querySelectorAll('.cdk-overlay-pane') || [];
+          return {
+            url: location.href,
+            hasDialog: !!document.querySelector('mat-dialog-container'),
+            overlayPanes: overlayPanes.length,
+            overlayContent: overlayContainer?.innerHTML?.substring(0, 300) || '',
+            hasTurnstile: !!document.querySelector('iframe[src*="turnstile"]'),
+            turnstileWidgets: document.querySelectorAll('.cf-turnstile').length,
+            bodyText: document.body.innerText.substring(0, 800),
+          };
+        });
+        console.log('[details] Final state:', JSON.stringify(state));
+      }
     }
 
     await page.waitForLoadState('networkidle').catch(() => {});
