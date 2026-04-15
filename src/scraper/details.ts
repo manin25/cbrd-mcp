@@ -461,110 +461,124 @@ async function extractDetailsFromPage(
     }
     result.financialSummaries = financialSummaries;
 
-    // --- LAST FINANCIAL SUMMARY (P&L + Balance Sheet) ---
-    // This section uses label/value pairs inside a specific panel, not a table
-    var lastFinPanel = (function() {
+    // --- PROFIT AND LOSS STATEMENT + BALANCE SHEET ---
+    // CBRIS uses separate panels: "PROFIT AND LOSS STATEMENT" and "BALANCE SHEET"
+    // Each panel has label/value pairs for header fields and line items for financials
+
+    // Helper: find a panel element by title keyword
+    function findPanel(keyword: string): Element | null {
       var panels = dialog!.querySelectorAll('mat-expansion-panel');
-      for (var lf = 0; lf < panels.length; lf++) {
-        var title = panels[lf].querySelector('mat-panel-title');
-        if (title && (title.textContent || '').trim().toUpperCase().includes('LAST FINANCIAL SUMMARY')) {
-          return panels[lf];
+      for (var fp = 0; fp < panels.length; fp++) {
+        var title = panels[fp].querySelector('mat-panel-title');
+        if (title && (title.textContent || '').trim().toUpperCase().includes(keyword.toUpperCase())) {
+          return panels[fp];
         }
       }
       return null;
-    })();
+    }
 
-    if (lastFinPanel) {
-      // Helper to get field value within the financial panel
-      function getFinField(labelText: string): string | undefined {
-        var labels = lastFinPanel!.querySelectorAll('label.label');
-        for (var lfi = 0; lfi < labels.length; lfi++) {
-          var text = (labels[lfi].textContent || '').replace(':', '').trim().toLowerCase();
-          if (text === labelText.toLowerCase()) {
-            var valueEl = labels[lfi].nextElementSibling;
-            if (valueEl && valueEl.classList.contains('value')) {
-              var val = (valueEl.textContent || '').trim();
-              if (val) return val;
+    // Helper: get label.value field scoped to a specific panel
+    function getPanelField(panel: Element, labelText: string): string | undefined {
+      var labels = panel.querySelectorAll('label.label');
+      for (var pfi = 0; pfi < labels.length; pfi++) {
+        var text = (labels[pfi].textContent || '').replace(':', '').trim().toLowerCase();
+        if (text === labelText.toLowerCase()) {
+          var valueEl = labels[pfi].nextElementSibling;
+          if (valueEl && valueEl.classList.contains('value')) {
+            var val = (valueEl.textContent || '').trim();
+            if (val) return val;
+          }
+        }
+      }
+      return undefined;
+    }
+
+    // Helper: get financial line item value from a panel — searches rows for text label and numeric value
+    function getLineItem(panel: Element, itemText: string): string | undefined {
+      var allRows = panel.querySelectorAll('tr, .row, div[class*="row"]');
+      for (var li = 0; li < allRows.length; li++) {
+        var rowText = (allRows[li].textContent || '').trim();
+        if (rowText.toLowerCase().includes(itemText.toLowerCase())) {
+          // Get the last number-like text in the row
+          var cells = allRows[li].querySelectorAll('td, .col, span, label.value');
+          for (var lci = cells.length - 1; lci >= 0; lci--) {
+            var cellVal = (cells[lci].textContent || '').trim();
+            if (cellVal && /^-?[\d,]+\.?\d*$/.test(cellVal.replace(/,/g, ''))) {
+              return cellVal;
             }
           }
         }
-        return undefined;
       }
+      return undefined;
+    }
 
-      // Helper to get financial line item value — looks for text in left column and value in right
-      function getFinLineItem(itemText: string): string | undefined {
-        // Financial items might be in table rows or div rows
-        var allRows = lastFinPanel!.querySelectorAll('tr, .row, div[class*="row"]');
-        for (var fri = 0; fri < allRows.length; fri++) {
-          var rowText = (allRows[fri].textContent || '').trim();
-          if (rowText.toLowerCase().includes(itemText.toLowerCase())) {
-            // Get the last number-like text in the row
-            var cells = allRows[fri].querySelectorAll('td, .col, span, label.value');
-            for (var fci = cells.length - 1; fci >= 0; fci--) {
-              var cellVal = (cells[fci].textContent || '').trim();
-              if (cellVal && /^-?[\d,]+\.?\d*$/.test(cellVal.replace(/,/g, ''))) {
-                return cellVal;
-              }
-            }
-          }
-        }
-        return undefined;
-      }
+    var plPanel = findPanel('PROFIT AND LOSS');
+    var bsPanel = findPanel('BALANCE SHEET');
 
+    if (plPanel || bsPanel) {
+      // Get header fields from whichever panel has them (P&L panel usually has them)
+      var finHeaderPanel = plPanel || bsPanel;
       result.lastFinancialSummary = {
-        financialYearEnded: getFinField('Financial Year Ended'),
-        currency: getFinField('Currency'),
-        dateApproved: getFinField('Date Approved'),
-        unit: getFinField('Unit'),
-        profitAndLoss: {
-          turnover: getFinLineItem('Turnover'),
-          costOfSales: getFinLineItem('Cost of Sales'),
-          grossProfit: getFinLineItem('Gross Profit'),
-          otherIncome: getFinLineItem('Other Income'),
-          distributionCosts: getFinLineItem('Distribution Costs'),
-          administrationCosts: getFinLineItem('Administration Costs'),
-          otherExpenses: getFinLineItem('Other Expenses'),
-          financeCosts: getFinLineItem('Finance Costs'),
-          profitBeforeTax: getFinLineItem('Profit/(Loss) Before Tax') || getFinLineItem('PROFIT/(LOSS) BEFORE TAX'),
-          taxExpense: getFinLineItem('Tax Expense'),
-          profitForPeriod: getFinLineItem('Profit/(Loss) For The Period') || getFinLineItem('PROFIT/(LOSS) FOR THE PERIOD'),
-          totalComprehensiveIncome: getFinLineItem('Total Comprehensive Income'),
-        },
-        balanceSheet: {
+        financialYearEnded: finHeaderPanel ? getPanelField(finHeaderPanel, 'Financial Year Ended') : undefined,
+        currency: finHeaderPanel ? getPanelField(finHeaderPanel, 'Currency') : undefined,
+        dateApproved: finHeaderPanel ? getPanelField(finHeaderPanel, 'Date Approved') : undefined,
+        unit: finHeaderPanel ? getPanelField(finHeaderPanel, 'Unit') : undefined,
+        profitAndLoss: plPanel ? {
+          turnover: getLineItem(plPanel, 'Turnover'),
+          costOfSales: getLineItem(plPanel, 'Cost of Sales'),
+          grossProfit: getLineItem(plPanel, 'Gross Profit'),
+          otherIncome: getLineItem(plPanel, 'Other Income'),
+          distributionCosts: getLineItem(plPanel, 'Distribution Costs'),
+          administrationCosts: getLineItem(plPanel, 'Administration Costs'),
+          otherExpenses: getLineItem(plPanel, 'Other Expenses'),
+          financeCosts: getLineItem(plPanel, 'Finance Costs'),
+          profitBeforeTax: getLineItem(plPanel, 'Before Tax'),
+          taxExpense: getLineItem(plPanel, 'Tax Expense'),
+          profitForPeriod: getLineItem(plPanel, 'For The Period') || getLineItem(plPanel, 'FOR THE PERIOD'),
+          totalComprehensiveIncome: getLineItem(plPanel, 'Total Comprehensive Income'),
+        } : undefined,
+        balanceSheet: bsPanel ? {
           nonCurrentAssets: {
-            propertyPlantEquipment: getFinLineItem('Property, Plant and Equipment'),
-            investmentProperties: getFinLineItem('Investment Properties'),
-            intangibleAssets: getFinLineItem('Intangible Assets'),
-            otherInvestments: getFinLineItem('Other Investments'),
-            investmentInSubsidiaries: getFinLineItem('Investment in Subsidiaries'),
-            biologicalAssets: getFinLineItem('Biological Assets'),
+            propertyPlantEquipment: getLineItem(bsPanel, 'Property, Plant and Equipment'),
+            investmentProperties: getLineItem(bsPanel, 'Investment Properties'),
+            intangibleAssets: getLineItem(bsPanel, 'Intangible Assets'),
+            otherInvestments: getLineItem(bsPanel, 'Other Investments'),
+            investmentInSubsidiaries: getLineItem(bsPanel, 'Investment in Subsidiaries'),
+            biologicalAssets: getLineItem(bsPanel, 'Biological Assets'),
           },
           currentAssets: {
-            inventories: getFinLineItem('Inventories'),
-            tradeAndOtherReceivables: getFinLineItem('Trade and Other Receivables'),
-            cashAndCashEquivalents: getFinLineItem('Cash and Cash Equivalents'),
+            inventories: getLineItem(bsPanel, 'Inventories'),
+            tradeAndOtherReceivables: getLineItem(bsPanel, 'Trade and Other Receivables'),
+            cashAndCashEquivalents: getLineItem(bsPanel, 'Cash and Cash Equivalents'),
           },
-          totalAssets: getFinLineItem('Total Assets') || getFinLineItem('TOTAL ASSETS'),
+          totalAssets: getLineItem(bsPanel, 'Total Assets') || getLineItem(bsPanel, 'TOTAL ASSETS'),
           equityAndLiabilities: {
-            shareCapital: getFinLineItem('Share Capital'),
-            otherReserves: getFinLineItem('Other Reserves'),
-            retainedEarnings: getFinLineItem('Retained Earnings'),
+            shareCapital: getLineItem(bsPanel, 'Share Capital'),
+            otherReserves: getLineItem(bsPanel, 'Other Reserves'),
+            retainedEarnings: getLineItem(bsPanel, 'Retained Earnings'),
           },
           nonCurrentLiabilities: {
-            longTermBorrowings: getFinLineItem('Long Term Borrowings'),
-            deferredTax: getFinLineItem('Deferred Tax'),
-            longTermProvisions: getFinLineItem('Long Term Provisions'),
+            longTermBorrowings: getLineItem(bsPanel, 'Long Term Borrowings'),
+            deferredTax: getLineItem(bsPanel, 'Deferred Tax'),
+            longTermProvisions: getLineItem(bsPanel, 'Long Term Provisions'),
           },
           currentLiabilities: {
-            tradeAndOtherPayables: getFinLineItem('Trade and Other Payables'),
-            shortTermBorrowings: getFinLineItem('Short Term Borrowings'),
-            currentTaxPayable: getFinLineItem('Current Tax Payable'),
-            shortTermProvisions: getFinLineItem('Short Term Provisions'),
+            tradeAndOtherPayables: getLineItem(bsPanel, 'Trade and Other Payables'),
+            shortTermBorrowings: getLineItem(bsPanel, 'Short Term Borrowings'),
+            currentTaxPayable: getLineItem(bsPanel, 'Current Tax Payable'),
+            shortTermProvisions: getLineItem(bsPanel, 'Short Term Provisions'),
           },
-          totalLiabilities: getFinLineItem('Total Liabilities') || getFinLineItem('TOTAL LIABILITIES'),
-          totalEquityAndLiabilities: getFinLineItem('Total Equity and Liabilities') || getFinLineItem('TOTAL EQUITY AND LIABILITIES'),
-        },
+          totalLiabilities: getLineItem(bsPanel, 'Total Liabilities') || getLineItem(bsPanel, 'TOTAL LIABILITIES'),
+          totalEquityAndLiabilities: getLineItem(bsPanel, 'Total Equity and Liabilities') || getLineItem(bsPanel, 'TOTAL EQUITY AND LIABILITIES'),
+        } : undefined,
       };
+    }
+
+    // --- ANNUAL REGISTRATION FEE (separate panel on CBRIS) ---
+    var feePanel = findPanel('ANNUAL REGISTRATION FEE');
+    if (feePanel) {
+      result.lastAnnualRegistrationFeePaid = getPanelField(feePanel, 'Last Annual Registration Fee Paid')
+        || (feePanel.textContent || '').replace(/[^0-9]/g, '').trim() || undefined;
     }
 
     // --- CHARGES ---
@@ -615,9 +629,6 @@ async function extractDetailsFromPage(
       });
     }
     result.objections = objections;
-
-    // --- LAST ANNUAL REGISTRATION FEE PAID ---
-    result.lastAnnualRegistrationFeePaid = getField('Last Annual Registration Fee Paid');
 
     // --- EXTRACT OF FILE WITH ADDITIONAL COMMENTS ---
     var noteRows = getPanelTableRows('EXTRACT');
