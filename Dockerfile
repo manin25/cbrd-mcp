@@ -28,8 +28,8 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 
-# Install Patchright Chromium browser binary (stealth-patched Playwright)
-RUN npx patchright install chromium
+# Install Patchright Chromium browser binary (must use patchright-core to match the locked version)
+RUN npx patchright-core install chromium
 
 # Copy source and build
 COPY tsconfig.json ./
