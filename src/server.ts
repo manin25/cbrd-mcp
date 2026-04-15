@@ -85,7 +85,7 @@ export function createMcpServer(): McpServer {
   // Tool 3: Get full company details
   server.tool(
     'cbrd_company_details',
-    'Get full details for a specific company from Mauritius CBRD, including directors, shareholders, registered office, and other available information.',
+    'Get full details for a specific company from Mauritius CBRD. Returns: company info, directors, shareholders, secretaries, members, stated capital, business details, certificates, annual returns, financial summary (P&L + balance sheet), charges, winding up details, objections, and registration fee status.',
     {
       file_number: z.string().min(1).describe('The company file number to get details for'),
     },

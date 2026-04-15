@@ -403,6 +403,237 @@ async function extractDetailsFromPage(
       });
     }
 
+    // --- MEMBERS (Company Limited by Guarantee) ---
+    var memRows = getPanelTableRows('MEMBERS');
+    var members: any[] = [];
+    for (var m = 0; m < memRows.length; m++) {
+      var memName = cellText(memRows[m], 'Name');
+      if (!memName) continue;
+      members.push({
+        name: memName,
+        amount: cellText(memRows[m], 'Amount'),
+        startDate: cellText(memRows[m], 'Start Date'),
+        currency: cellText(memRows[m], 'Currency'),
+      });
+    }
+    result.members = members;
+
+    // --- CERTIFICATES (Issued by Other Institutions) ---
+    var certRows = getPanelTableRows('CERTIFICATE');
+    var certificates: any[] = [];
+    for (var ct = 0; ct < certRows.length; ct++) {
+      var certName = cellText(certRows[ct], 'Certificate') || cellText(certRows[ct], 'Certificate Type');
+      if (!certName) continue;
+      certificates.push({
+        certificate: certName,
+        type: cellText(certRows[ct], 'Type'),
+        effectiveDate: cellText(certRows[ct], 'Effective Date'),
+        expiryDate: cellText(certRows[ct], 'Expiry Date'),
+      });
+    }
+    result.certificates = certificates;
+
+    // --- ANNUAL RETURNS FILED ---
+    var arRows = getPanelTableRows('ANNUAL RETURN');
+    var annualReturns: any[] = [];
+    for (var ar = 0; ar < arRows.length; ar++) {
+      var arDate = cellText(arRows[ar], 'Date Annual Return');
+      if (!arDate) continue;
+      annualReturns.push({
+        dateAnnualReturn: arDate,
+        annualMeetingDate: cellText(arRows[ar], 'Annual Meeting Date'),
+        dateFiled: cellText(arRows[ar], 'Date Filed'),
+      });
+    }
+    result.annualReturns = annualReturns;
+
+    // --- FINANCIAL SUMMARY/STATEMENTS FILED ---
+    var fsRows = getPanelTableRows('FINANCIAL SUMMARY');
+    var financialSummaries: any[] = [];
+    for (var fs = 0; fs < fsRows.length; fs++) {
+      var fyEnded = cellText(fsRows[fs], 'Financial Year Ended');
+      if (!fyEnded) continue;
+      financialSummaries.push({
+        financialYearEnded: fyEnded,
+        currency: cellText(fsRows[fs], 'Currency'),
+        dateApproved: cellText(fsRows[fs], 'Date Approved'),
+      });
+    }
+    result.financialSummaries = financialSummaries;
+
+    // --- LAST FINANCIAL SUMMARY (P&L + Balance Sheet) ---
+    // This section uses label/value pairs inside a specific panel, not a table
+    var lastFinPanel = (function() {
+      var panels = dialog!.querySelectorAll('mat-expansion-panel');
+      for (var lf = 0; lf < panels.length; lf++) {
+        var title = panels[lf].querySelector('mat-panel-title');
+        if (title && (title.textContent || '').trim().toUpperCase().includes('LAST FINANCIAL SUMMARY')) {
+          return panels[lf];
+        }
+      }
+      return null;
+    })();
+
+    if (lastFinPanel) {
+      // Helper to get field value within the financial panel
+      function getFinField(labelText: string): string | undefined {
+        var labels = lastFinPanel!.querySelectorAll('label.label');
+        for (var lfi = 0; lfi < labels.length; lfi++) {
+          var text = (labels[lfi].textContent || '').replace(':', '').trim().toLowerCase();
+          if (text === labelText.toLowerCase()) {
+            var valueEl = labels[lfi].nextElementSibling;
+            if (valueEl && valueEl.classList.contains('value')) {
+              var val = (valueEl.textContent || '').trim();
+              if (val) return val;
+            }
+          }
+        }
+        return undefined;
+      }
+
+      // Helper to get financial line item value — looks for text in left column and value in right
+      function getFinLineItem(itemText: string): string | undefined {
+        // Financial items might be in table rows or div rows
+        var allRows = lastFinPanel!.querySelectorAll('tr, .row, div[class*="row"]');
+        for (var fri = 0; fri < allRows.length; fri++) {
+          var rowText = (allRows[fri].textContent || '').trim();
+          if (rowText.toLowerCase().includes(itemText.toLowerCase())) {
+            // Get the last number-like text in the row
+            var cells = allRows[fri].querySelectorAll('td, .col, span, label.value');
+            for (var fci = cells.length - 1; fci >= 0; fci--) {
+              var cellVal = (cells[fci].textContent || '').trim();
+              if (cellVal && /^-?[\d,]+\.?\d*$/.test(cellVal.replace(/,/g, ''))) {
+                return cellVal;
+              }
+            }
+          }
+        }
+        return undefined;
+      }
+
+      result.lastFinancialSummary = {
+        financialYearEnded: getFinField('Financial Year Ended'),
+        currency: getFinField('Currency'),
+        dateApproved: getFinField('Date Approved'),
+        unit: getFinField('Unit'),
+        profitAndLoss: {
+          turnover: getFinLineItem('Turnover'),
+          costOfSales: getFinLineItem('Cost of Sales'),
+          grossProfit: getFinLineItem('Gross Profit'),
+          otherIncome: getFinLineItem('Other Income'),
+          distributionCosts: getFinLineItem('Distribution Costs'),
+          administrationCosts: getFinLineItem('Administration Costs'),
+          otherExpenses: getFinLineItem('Other Expenses'),
+          financeCosts: getFinLineItem('Finance Costs'),
+          profitBeforeTax: getFinLineItem('Profit/(Loss) Before Tax') || getFinLineItem('PROFIT/(LOSS) BEFORE TAX'),
+          taxExpense: getFinLineItem('Tax Expense'),
+          profitForPeriod: getFinLineItem('Profit/(Loss) For The Period') || getFinLineItem('PROFIT/(LOSS) FOR THE PERIOD'),
+          totalComprehensiveIncome: getFinLineItem('Total Comprehensive Income'),
+        },
+        balanceSheet: {
+          nonCurrentAssets: {
+            propertyPlantEquipment: getFinLineItem('Property, Plant and Equipment'),
+            investmentProperties: getFinLineItem('Investment Properties'),
+            intangibleAssets: getFinLineItem('Intangible Assets'),
+            otherInvestments: getFinLineItem('Other Investments'),
+            investmentInSubsidiaries: getFinLineItem('Investment in Subsidiaries'),
+            biologicalAssets: getFinLineItem('Biological Assets'),
+          },
+          currentAssets: {
+            inventories: getFinLineItem('Inventories'),
+            tradeAndOtherReceivables: getFinLineItem('Trade and Other Receivables'),
+            cashAndCashEquivalents: getFinLineItem('Cash and Cash Equivalents'),
+          },
+          totalAssets: getFinLineItem('Total Assets') || getFinLineItem('TOTAL ASSETS'),
+          equityAndLiabilities: {
+            shareCapital: getFinLineItem('Share Capital'),
+            otherReserves: getFinLineItem('Other Reserves'),
+            retainedEarnings: getFinLineItem('Retained Earnings'),
+          },
+          nonCurrentLiabilities: {
+            longTermBorrowings: getFinLineItem('Long Term Borrowings'),
+            deferredTax: getFinLineItem('Deferred Tax'),
+            longTermProvisions: getFinLineItem('Long Term Provisions'),
+          },
+          currentLiabilities: {
+            tradeAndOtherPayables: getFinLineItem('Trade and Other Payables'),
+            shortTermBorrowings: getFinLineItem('Short Term Borrowings'),
+            currentTaxPayable: getFinLineItem('Current Tax Payable'),
+            shortTermProvisions: getFinLineItem('Short Term Provisions'),
+          },
+          totalLiabilities: getFinLineItem('Total Liabilities') || getFinLineItem('TOTAL LIABILITIES'),
+          totalEquityAndLiabilities: getFinLineItem('Total Equity and Liabilities') || getFinLineItem('TOTAL EQUITY AND LIABILITIES'),
+        },
+      };
+    }
+
+    // --- CHARGES ---
+    var chgRows = getPanelTableRows('CHARGES');
+    var charges: any[] = [];
+    for (var ch = 0; ch < chgRows.length; ch++) {
+      var chVol = cellText(chgRows[ch], 'Volume');
+      var chProp = cellText(chgRows[ch], 'Property');
+      var chNat = cellText(chgRows[ch], 'Nature');
+      if (chVol || chProp || chNat) {
+        charges.push({
+          volume: chVol,
+          property: chProp,
+          nature: chNat,
+          amount: cellText(chgRows[ch], 'Amount'),
+          dateCharged: cellText(chgRows[ch], 'Date Charged'),
+          dateFiled: cellText(chgRows[ch], 'Date Filed'),
+          currency: cellText(chgRows[ch], 'Currency'),
+        });
+      }
+    }
+    result.charges = charges;
+
+    // --- REMOVAL / WINDING UP DETAILS ---
+    var wuRows = getPanelTableRows('REMOVAL') || getPanelTableRows('WINDING UP');
+    var windingUp: any[] = [];
+    for (var wu = 0; wu < wuRows.length; wu++) {
+      var wuType = cellText(wuRows[wu], 'Type');
+      if (!wuType) continue;
+      windingUp.push({
+        type: wuType,
+        startDate: cellText(wuRows[wu], 'Start Date'),
+        endDate: cellText(wuRows[wu], 'End Date'),
+        status: cellText(wuRows[wu], 'Status'),
+      });
+    }
+    result.windingUp = windingUp;
+
+    // --- OBJECTIONS ---
+    var objRows = getPanelTableRows('OBJECTION');
+    var objections: any[] = [];
+    for (var ob = 0; ob < objRows.length; ob++) {
+      var objDate = cellText(objRows[ob], 'Objection Date');
+      if (!objDate) continue;
+      objections.push({
+        objectionDate: objDate,
+        objector: cellText(objRows[ob], 'Objector'),
+      });
+    }
+    result.objections = objections;
+
+    // --- LAST ANNUAL REGISTRATION FEE PAID ---
+    result.lastAnnualRegistrationFeePaid = getField('Last Annual Registration Fee Paid');
+
+    // --- EXTRACT OF FILE WITH ADDITIONAL COMMENTS ---
+    var noteRows = getPanelTableRows('EXTRACT');
+    var extractNotes: any[] = [];
+    for (var en = 0; en < noteRows.length; en++) {
+      var noteId = cellText(noteRows[en], 'SerialID') || cellText(noteRows[en], 'Serial');
+      var noteText = cellText(noteRows[en], 'Notes');
+      if (noteId || noteText) {
+        extractNotes.push({
+          serialId: noteId,
+          notes: noteText,
+        });
+      }
+    }
+    result.extractNotes = extractNotes;
+
     return result;
   }, fileNumber);
 
@@ -412,8 +643,12 @@ async function extractDetailsFromPage(
   }
 
   if (details.companyName) {
-    console.log('[details] Extracted:', details.companyName, '- directors:', details.directors.length,
-      'shareholders:', details.shareholders.length, 'secretaries:', details.secretaries.length);
+    console.log('[details] Extracted:', details.companyName,
+      '- directors:', details.directors.length,
+      'shareholders:', details.shareholders.length,
+      'secretaries:', details.secretaries.length,
+      'charges:', details.charges?.length || 0,
+      'financials:', details.lastFinancialSummary ? 'yes' : 'no');
     return details as CompanyDetails;
   }
 
