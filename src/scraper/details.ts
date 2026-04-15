@@ -233,6 +233,62 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
     });
     await page.waitForTimeout(1000);
 
+    // Diagnostic: dump DOM structure of financial panels + annual return panel
+    const panelDiag = await page.evaluate(() => {
+      const dialog = document.querySelector('mat-dialog-container');
+      if (!dialog) return { error: 'no dialog' };
+
+      function dumpPanel(keyword: string) {
+        const panels = dialog!.querySelectorAll('mat-expansion-panel');
+        for (let i = 0; i < panels.length; i++) {
+          const title = panels[i].querySelector('mat-panel-title');
+          if (title && (title.textContent || '').trim().toUpperCase().includes(keyword.toUpperCase())) {
+            // Get inner HTML structure (truncated)
+            const html = panels[i].innerHTML.substring(0, 3000);
+            // Get all text rows with their structure
+            const rows: string[] = [];
+            panels[i].querySelectorAll('tr, .row, div[class*="row"]').forEach((r, idx) => {
+              const tag = r.tagName.toLowerCase();
+              const cls = r.className || '';
+              const directText = Array.from(r.childNodes)
+                .filter(n => n.nodeType === 3)
+                .map(n => (n.textContent || '').trim())
+                .filter(Boolean)
+                .join('|');
+              const cells: string[] = [];
+              r.querySelectorAll('td, .col, span, label').forEach(c => {
+                const t = (c.textContent || '').trim();
+                if (t) cells.push(`<${c.tagName.toLowerCase()} class="${c.className}">${t.substring(0, 60)}`);
+              });
+              if (cells.length > 0) {
+                rows.push(`[${idx}] <${tag} class="${cls.substring(0, 40)}"> directText="${directText}" cells=${JSON.stringify(cells).substring(0, 300)}`);
+              }
+            });
+            // Also check for label.label / label.value pairs
+            const labelPairs: string[] = [];
+            panels[i].querySelectorAll('label.label').forEach(lbl => {
+              const next = lbl.nextElementSibling;
+              const val = next?.classList.contains('value') ? (next.textContent || '').trim() : '(no value sibling)';
+              labelPairs.push(`${(lbl.textContent || '').trim()} => ${val.substring(0, 50)}`);
+            });
+            return { title: (title.textContent || '').trim(), rows, labelPairs, htmlSnippet: html.substring(0, 1500) };
+          }
+        }
+        return null;
+      }
+
+      return {
+        balanceSheet: dumpPanel('BALANCE SHEET'),
+        profitAndLoss: dumpPanel('PROFIT AND LOSS'),
+        annualReturn: dumpPanel('ANNUAL RETURN'),
+        annualRegFee: dumpPanel('ANNUAL REGISTRATION FEE'),
+      };
+    });
+    console.log('[details] DIAG balance sheet:', JSON.stringify(panelDiag.balanceSheet)?.substring(0, 2000));
+    console.log('[details] DIAG P&L:', JSON.stringify(panelDiag.profitAndLoss)?.substring(0, 2000));
+    console.log('[details] DIAG annual return:', JSON.stringify(panelDiag.annualReturn)?.substring(0, 2000));
+    console.log('[details] DIAG annual reg fee:', JSON.stringify(panelDiag.annualRegFee)?.substring(0, 2000));
+
     // Extract details
     const details = await extractDetailsFromPage(page, fileNumber);
     return details;
