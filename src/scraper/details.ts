@@ -490,15 +490,24 @@ async function extractDetailsFromPage(
     result.certificates = certificates;
 
     // --- ANNUAL RETURNS FILED ---
+    // CBRIS uses positional <td> cells without data-column attributes:
+    // td[0]=index, td[1]=Date Annual Return, td[2]=Annual Meeting Date, td[3]=Date Filed
     var arRows = getPanelTableRows('ANNUAL RETURN');
     var annualReturns: any[] = [];
     for (var ar = 0; ar < arRows.length; ar++) {
-      var arDate = cellText(arRows[ar], 'Date Annual Return');
-      if (!arDate) continue;
+      var arCells = arRows[ar].querySelectorAll('td');
+      if (arCells.length < 3) continue;
+      var arDate = (arCells.length >= 4 ? arCells[1] : arCells[0]).textContent?.trim();
+      if (!arDate || /^\d+$/.test(arDate)) {
+        // First cell is just an index number — shift to use cells 1-3
+        if (arCells.length >= 4) {
+          arDate = arCells[1].textContent?.trim();
+        } else continue;
+      }
       annualReturns.push({
         dateAnnualReturn: arDate,
-        annualMeetingDate: cellText(arRows[ar], 'Annual Meeting Date'),
-        dateFiled: cellText(arRows[ar], 'Date Filed'),
+        annualMeetingDate: (arCells.length >= 4 ? arCells[2] : arCells[1]).textContent?.trim(),
+        dateFiled: (arCells.length >= 4 ? arCells[3] : arCells[2]).textContent?.trim(),
       });
     }
     result.annualReturns = annualReturns;
@@ -518,8 +527,27 @@ async function extractDetailsFromPage(
     result.financialSummaries = financialSummaries;
 
     // --- PROFIT AND LOSS STATEMENT + BALANCE SHEET ---
-    // CBRIS uses separate panels: "PROFIT AND LOSS STATEMENT" and "BALANCE SHEET"
-    // Each panel has label/value pairs for header fields and line items for financials
+    // CBRIS renders these as VERTICAL tables: each <tr> has a single <td> with just the VALUE.
+    // Labels are NOT in the row — they're implied by position (row index).
+    // Row layout discovered from DOM diagnostics:
+    //
+    // P&L rows: [0]=header div, [1]=Turnover, [2]=Cost of Sales, [3]=Gross Profit (total),
+    //   [4]=Other Income, [5]=Distribution Costs, [6]=Admin Costs, [7]=Other Expenses,
+    //   [8]=Finance Costs, [9]=PBT (total), [10]=Tax Expense, [11]=Profit for Period (total),
+    //   [12]=Total Comprehensive Income (total)
+    //
+    // BS rows: [0]=header div, [1]=NCA title, [2]=PPE, [3]=Investment Properties,
+    //   [4]=Intangible Assets, [5]=Other Investments, [6]=Investment in Subsidiaries,
+    //   [7]=Biological Assets, [8]=Others, [9]=NCA Total,
+    //   [10]=CA title, [11]=Inventories, [12]=Trade Receivables, [13]=Cash,
+    //   [14]=Others, [15]=CA Total, [16]=Total Assets,
+    //   [17]=E&L title, [18]=Share Capital, [19]=Other Reserves, [20]=Retained Earnings,
+    //   [21]=Others, [22]=Equity Total,
+    //   [23]=NCL title, [24]=LT Borrowings, [25]=Deferred Tax, [26]=LT Provisions,
+    //   [27]=Others, [28]=NCL Total,
+    //   [29]=CL title, [30]=Trade Payables, [31]=ST Borrowings, [32]=Current Tax,
+    //   [33]=ST Provisions, [34]=Others, [35]=CL Total,
+    //   [36]=Total Liabilities, [37]=Total E&L
 
     // Helper: find a panel element by title keyword
     function findPanel(keyword: string): Element | null {
@@ -549,30 +577,20 @@ async function extractDetailsFromPage(
       return undefined;
     }
 
-    // Helper: get financial line item value from a panel — searches rows for text label and numeric value
-    function getLineItem(panel: Element, itemText: string): string | undefined {
-      var allRows = panel.querySelectorAll('tr, .row, div[class*="row"]');
-      for (var li = 0; li < allRows.length; li++) {
-        var rowText = (allRows[li].textContent || '').trim();
-        if (rowText.toLowerCase().includes(itemText.toLowerCase())) {
-          // Get the last number-like text in the row
-          var cells = allRows[li].querySelectorAll('td, .col, span, label.value');
-          for (var lci = cells.length - 1; lci >= 0; lci--) {
-            var cellVal = (cells[lci].textContent || '').trim();
-            if (cellVal && /^-?[\d,]+\.?\d*$/.test(cellVal.replace(/,/g, ''))) {
-              return cellVal;
-            }
-          }
-        }
-      }
-      return undefined;
+    // Helper: get value from a <tr> by index within a panel's table
+    // Each <tr> has a single <td> with the value; skip header div rows
+    function getRowVal(panel: Element, rowIndex: number): string | undefined {
+      var trs = panel.querySelectorAll('tr');
+      if (rowIndex >= trs.length) return undefined;
+      var td = trs[rowIndex].querySelector('td');
+      var val = td?.textContent?.trim();
+      return val || undefined;
     }
 
     var plPanel = findPanel('PROFIT AND LOSS');
     var bsPanel = findPanel('BALANCE SHEET');
 
     if (plPanel || bsPanel) {
-      // Get header fields from whichever panel has them (P&L panel usually has them)
       var finHeaderPanel = plPanel || bsPanel;
       result.lastFinancialSummary = {
         financialYearEnded: finHeaderPanel ? getPanelField(finHeaderPanel, 'Financial Year Ended') : undefined,
@@ -580,52 +598,68 @@ async function extractDetailsFromPage(
         dateApproved: finHeaderPanel ? getPanelField(finHeaderPanel, 'Date Approved') : undefined,
         unit: finHeaderPanel ? getPanelField(finHeaderPanel, 'Unit') : undefined,
         profitAndLoss: plPanel ? {
-          turnover: getLineItem(plPanel, 'Turnover'),
-          costOfSales: getLineItem(plPanel, 'Cost of Sales'),
-          grossProfit: getLineItem(plPanel, 'Gross Profit'),
-          otherIncome: getLineItem(plPanel, 'Other Income'),
-          distributionCosts: getLineItem(plPanel, 'Distribution Costs'),
-          administrationCosts: getLineItem(plPanel, 'Administration Costs'),
-          otherExpenses: getLineItem(plPanel, 'Other Expenses'),
-          financeCosts: getLineItem(plPanel, 'Finance Costs'),
-          profitBeforeTax: getLineItem(plPanel, 'Before Tax'),
-          taxExpense: getLineItem(plPanel, 'Tax Expense'),
-          profitForPeriod: getLineItem(plPanel, 'For The Period') || getLineItem(plPanel, 'FOR THE PERIOD'),
-          totalComprehensiveIncome: getLineItem(plPanel, 'Total Comprehensive Income'),
+          // P&L: tr[0]=Turnover, tr[1]=Cost of Sales, tr[2]=Gross Profit, ...
+          turnover: getRowVal(plPanel, 0),
+          costOfSales: getRowVal(plPanel, 1),
+          grossProfit: getRowVal(plPanel, 2),
+          otherIncome: getRowVal(plPanel, 3),
+          distributionCosts: getRowVal(plPanel, 4),
+          administrationCosts: getRowVal(plPanel, 5),
+          otherExpenses: getRowVal(plPanel, 6),
+          financeCosts: getRowVal(plPanel, 7),
+          profitBeforeTax: getRowVal(plPanel, 8),
+          taxExpense: getRowVal(plPanel, 9),
+          profitForPeriod: getRowVal(plPanel, 10),
+          totalComprehensiveIncome: getRowVal(plPanel, 11),
         } : undefined,
         balanceSheet: bsPanel ? {
           nonCurrentAssets: {
-            propertyPlantEquipment: getLineItem(bsPanel, 'Property, Plant and Equipment'),
-            investmentProperties: getLineItem(bsPanel, 'Investment Properties'),
-            intangibleAssets: getLineItem(bsPanel, 'Intangible Assets'),
-            otherInvestments: getLineItem(bsPanel, 'Other Investments'),
-            investmentInSubsidiaries: getLineItem(bsPanel, 'Investment in Subsidiaries'),
-            biologicalAssets: getLineItem(bsPanel, 'Biological Assets'),
+            // BS: tr[0]=NCA title, tr[1]=PPE, tr[2]=Inv Properties, ...
+            propertyPlantEquipment: getRowVal(bsPanel, 1),
+            investmentProperties: getRowVal(bsPanel, 2),
+            intangibleAssets: getRowVal(bsPanel, 3),
+            otherInvestments: getRowVal(bsPanel, 4),
+            investmentInSubsidiaries: getRowVal(bsPanel, 5),
+            biologicalAssets: getRowVal(bsPanel, 6),
+            others: getRowVal(bsPanel, 7),
+            total: getRowVal(bsPanel, 8),
           },
           currentAssets: {
-            inventories: getLineItem(bsPanel, 'Inventories'),
-            tradeAndOtherReceivables: getLineItem(bsPanel, 'Trade and Other Receivables'),
-            cashAndCashEquivalents: getLineItem(bsPanel, 'Cash and Cash Equivalents'),
+            // tr[9]=CA title, tr[10]=Inventories, ...
+            inventories: getRowVal(bsPanel, 10),
+            tradeAndOtherReceivables: getRowVal(bsPanel, 11),
+            cashAndCashEquivalents: getRowVal(bsPanel, 12),
+            others: getRowVal(bsPanel, 13),
+            total: getRowVal(bsPanel, 14),
           },
-          totalAssets: getLineItem(bsPanel, 'Total Assets') || getLineItem(bsPanel, 'TOTAL ASSETS'),
+          totalAssets: getRowVal(bsPanel, 15),
           equityAndLiabilities: {
-            shareCapital: getLineItem(bsPanel, 'Share Capital'),
-            otherReserves: getLineItem(bsPanel, 'Other Reserves'),
-            retainedEarnings: getLineItem(bsPanel, 'Retained Earnings'),
+            // tr[16]=E&L title, tr[17]=Share Capital, ...
+            shareCapital: getRowVal(bsPanel, 17),
+            otherReserves: getRowVal(bsPanel, 18),
+            retainedEarnings: getRowVal(bsPanel, 19),
+            others: getRowVal(bsPanel, 20),
+            total: getRowVal(bsPanel, 21),
           },
           nonCurrentLiabilities: {
-            longTermBorrowings: getLineItem(bsPanel, 'Long Term Borrowings'),
-            deferredTax: getLineItem(bsPanel, 'Deferred Tax'),
-            longTermProvisions: getLineItem(bsPanel, 'Long Term Provisions'),
+            // tr[22]=NCL title, tr[23]=LT Borrowings, ...
+            longTermBorrowings: getRowVal(bsPanel, 23),
+            deferredTax: getRowVal(bsPanel, 24),
+            longTermProvisions: getRowVal(bsPanel, 25),
+            others: getRowVal(bsPanel, 26),
+            total: getRowVal(bsPanel, 27),
           },
           currentLiabilities: {
-            tradeAndOtherPayables: getLineItem(bsPanel, 'Trade and Other Payables'),
-            shortTermBorrowings: getLineItem(bsPanel, 'Short Term Borrowings'),
-            currentTaxPayable: getLineItem(bsPanel, 'Current Tax Payable'),
-            shortTermProvisions: getLineItem(bsPanel, 'Short Term Provisions'),
+            // tr[28]=CL title, tr[29]=Trade Payables, ...
+            tradeAndOtherPayables: getRowVal(bsPanel, 29),
+            shortTermBorrowings: getRowVal(bsPanel, 30),
+            currentTaxPayable: getRowVal(bsPanel, 31),
+            shortTermProvisions: getRowVal(bsPanel, 32),
+            others: getRowVal(bsPanel, 33),
+            total: getRowVal(bsPanel, 34),
           },
-          totalLiabilities: getLineItem(bsPanel, 'Total Liabilities') || getLineItem(bsPanel, 'TOTAL LIABILITIES'),
-          totalEquityAndLiabilities: getLineItem(bsPanel, 'Total Equity and Liabilities') || getLineItem(bsPanel, 'TOTAL EQUITY AND LIABILITIES'),
+          totalLiabilities: getRowVal(bsPanel, 35),
+          totalEquityAndLiabilities: getRowVal(bsPanel, 36),
         } : undefined,
       };
     }
