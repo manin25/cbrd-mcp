@@ -125,71 +125,75 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
     console.log('[details] Waiting for CAPTCHA resolution...');
     await captchaPromise;
 
-    // After CAPTCHA is solved, the Turnstile token is set in cookies.
-    // The original View click was consumed by Turnstile. Reload the page
-    // to let Angular initialize with the Turnstile token, then redo search + View.
-    console.log('[details] CAPTCHA solved — reloading page to apply token');
-    await page.goto(CBRD_URL, { waitUntil: 'networkidle' });
-    await dismissCookieConsent(page);
-    await page.waitForSelector('#company-partnership-text-field', { timeout: 10000 });
+    // After CAPTCHA solved, DON'T reload — the Turnstile token lives in JS memory.
+    // Reloading destroys it. Instead, wait for the dialog to appear (the original
+    // View click should complete once Turnstile validates).
+    console.log('[details] CAPTCHA resolved — waiting for dialog...');
+    await page.waitForTimeout(2000);
 
-    // Redo the search
-    await page.click('#fileNo');
-    await page.waitForTimeout(300);
-    await page.fill('#company-partnership-text-field', fileNumber);
-    await page.click('button[type="submit"]');
+    // Check if the dialog appeared automatically after Turnstile validated
+    let hasDialog = await page.evaluate(() => !!document.querySelector('mat-dialog-container'));
 
-    await page.waitForFunction(() => {
-      const rows = document.querySelectorAll('lib-mns-universal-table table tbody tr');
-      if (rows.length === 0) return false;
-      return rows[0].querySelector('td[data-column="Name"]') !== null;
-    }, { timeout: 15000 });
+    if (!hasDialog) {
+      // Dialog didn't open — re-click View on the SAME page (no reload!)
+      console.log('[details] Dialog not open yet — re-clicking View');
 
-    // Click View — try multiple strategies to trigger Angular's handler
-    console.log('[details] Clicking View icon (post-CAPTCHA)');
+      // Check if search results are still visible
+      const hasResults = await page.evaluate(() => {
+        const rows = document.querySelectorAll('lib-mns-universal-table table tbody tr');
+        return rows.length > 0 && !!rows[0].querySelector('td[data-column="Name"]');
+      });
 
-    // Strategy 1: Use page.evaluate to click via DOM (runs inside Angular's zone)
-    const clicked = await page.evaluate(() => {
-      const viewIcon = document.querySelector('fa-icon[title="View"]');
-      if (!viewIcon) return 'no-icon';
-      // Try clicking the ancestor action-btn div first
-      const actionDiv = viewIcon.closest('[class*="action-btn"]');
-      if (actionDiv) {
-        (actionDiv as HTMLElement).click();
-        return 'action-div';
+      if (!hasResults) {
+        // Results disappeared (rare) — redo search WITHOUT reloading page
+        console.log('[details] Results gone — redoing search in-place');
+        await page.fill('#company-partnership-text-field', '');
+        await page.click('#fileNo');
+        await page.waitForTimeout(300);
+        await page.fill('#company-partnership-text-field', fileNumber);
+        await page.click('button[type="submit"]');
+        await page.waitForFunction(() => {
+          const rows = document.querySelectorAll('lib-mns-universal-table table tbody tr');
+          return rows.length > 0 && !!rows[0].querySelector('td[data-column="Name"]');
+        }, { timeout: 15000 });
       }
-      // Try clicking the icon itself
-      (viewIcon as HTMLElement).click();
-      return 'icon';
-    });
-    console.log('[details] Click strategy used:', clicked);
 
-    // If DOM click didn't work, try Playwright click as fallback
-    if (clicked === 'no-icon') {
-      console.log('[details] No View icon found via DOM — trying Playwright click');
+      // Click View via Playwright — proper event dispatch through Angular's zone
       const viewIconRetry = page.locator('fa-icon[title="View"]').first();
       await viewIconRetry.waitFor({ timeout: 5000 });
-      await viewIconRetry.click();
+      await viewIconRetry.click({ force: true });
+      console.log('[details] View re-clicked');
     }
 
     // Wait for the Material Dialog to appear
     try {
       await page.waitForSelector('mat-dialog-container', { timeout: 15000 });
-      await page.waitForSelector('mat-dialog-container label.value', { timeout: 10000 });
-      console.log('[details] Details dialog loaded');
+      console.log('[details] Dialog opened!');
     } catch {
-      console.log('[details] Timed out waiting for details dialog');
-      const finalState = await page.evaluate(() => ({
+      console.log('[details] Dialog still not open — logging state');
+      const state = await page.evaluate(() => ({
         url: location.href,
         hasDialog: !!document.querySelector('mat-dialog-container'),
         hasOverlay: !!document.querySelector('.cdk-overlay-container .cdk-overlay-pane'),
         hasTurnstile: !!document.querySelector('iframe[src*="turnstile"]'),
-        visibleText: document.body.innerText.substring(0, 300),
+        bodyText: document.body.innerText.substring(0, 500),
       }));
-      console.log('[details] Final state:', JSON.stringify(finalState));
+      console.log('[details] State:', JSON.stringify(state));
     }
 
     await page.waitForLoadState('networkidle').catch(() => {});
+
+    // Expand all mat-expansion-panels so their table content is rendered in the DOM.
+    // Collapsed panels use lazy rendering — tbody rows won't exist until expanded.
+    await page.evaluate(() => {
+      document.querySelectorAll('mat-expansion-panel-header').forEach(h => {
+        const panel = h.closest('mat-expansion-panel');
+        if (panel && !panel.classList.contains('mat-expanded')) {
+          (h as HTMLElement).click();
+        }
+      });
+    });
+    await page.waitForTimeout(1000);
 
     // Extract details
     const details = await extractDetailsFromPage(page, fileNumber);
