@@ -221,6 +221,28 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
 
     await page.waitForLoadState('networkidle').catch(() => {});
 
+    // Wait for dialog CONTENT to render — not just the container.
+    // Angular opens mat-dialog-container immediately but populates it async.
+    // We need the label.label elements (company info) and multiple expansion panels.
+    try {
+      await page.waitForFunction(() => {
+        const dialog = document.querySelector('mat-dialog-container');
+        if (!dialog) return false;
+        // Wait until at least 3 expansion panels exist (BUSINESS DETAILS, STATED CAPITAL, OFFICE BEARERS, etc.)
+        const panels = dialog.querySelectorAll('mat-expansion-panel');
+        if (panels.length < 3) return false;
+        // Also verify the company name label is present
+        const labels = dialog.querySelectorAll('label.label');
+        for (let i = 0; i < labels.length; i++) {
+          if ((labels[i].textContent || '').includes('Name')) return true;
+        }
+        return false;
+      }, { timeout: 15000 });
+      console.log('[details] Dialog content loaded');
+    } catch {
+      console.log('[details] Timed out waiting for dialog content — attempting extraction anyway');
+    }
+
     // Expand all mat-expansion-panels so their table content is rendered in the DOM.
     // Collapsed panels use lazy rendering — tbody rows won't exist until expanded.
     await page.evaluate(() => {
@@ -231,7 +253,7 @@ async function getDetailsViaBrowserless(fileNumber: string): Promise<CompanyDeta
         }
       });
     });
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1500);
 
     // Extract details
     const details = await extractDetailsFromPage(page, fileNumber);
